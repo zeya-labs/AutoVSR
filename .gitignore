@@ -1,0 +1,57 @@
+# Local secrets and private overrides
+.env
+.env.*
+!.env.example
+config/*.local.yaml
+config/*.json
+config/*secret*
+config/*credential*
+config/*key*.json
+
+# Full datasets are not committed. See README.md.
+data/
+datafile/
+transient_response_circuitsense/
+
+# Generated outputs and logs
+
+output/
+logs/
+release_results/
+*.log
+*.checkpoint.json
+evaluation/data/
+evaluation/output/
+evaluation/fix_missing_s.py
+
+# evaluation scripts and results
+evaluation/
+
+# Local documents and drafts
+docs/
+
+# Python/cache/build artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+.cursorignore
+
+# Archives and temporary files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tmp

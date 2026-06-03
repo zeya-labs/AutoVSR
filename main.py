@@ -15,6 +15,9 @@ import sys
 import json
 import logging
 import argparse
+import re
+import multiprocessing as mp
+import queue
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -22,6 +25,7 @@ import time as time_module
 
 import yaml
 from dotenv import load_dotenv
+import sympy as sp
 
 load_dotenv()
 
@@ -30,9 +34,94 @@ load_dotenv()
 # ============================================================
 PROJECT_ROOT = Path(__file__).parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure output directory exists
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+SYMBOLIC_EQUIV_TIMEOUT_SECONDS = float(os.getenv("AUTOVSR_SYMBOLIC_EQUIV_TIMEOUT", "20"))
+
+
+def _normalize_expression_text(expr: Any) -> str:
+    """Normalize predicted/reference expression text for symbolic comparison."""
+    text = str(expr or "").strip()
+    if "=" in text:
+        text = text.split("=", 1)[1].strip()
+    text = text.replace("^", "**")
+    text = text.replace("\\cdot", "*")
+    text = text.replace("{", "(").replace("}", ")")
+    # CircuitSense/SFG answers often use labels like G(s), H1(s), or V1(s)
+    # as symbolic block/source names rather than callable functions.
+    known_functions = {
+        "sin", "cos", "tan", "exp", "log", "sqrt", "Abs",
+        "asin", "acos", "atan", "sinh", "cosh", "tanh",
+    }
+
+    def _replace_function_label(match: re.Match[str]) -> str:
+        name = match.group(1)
+        return match.group(0) if name in known_functions else name
+
+    text = re.sub(r"\b([A-Za-z]\w*)\s*\(\s*s\s*\)", _replace_function_label, text)
+    return text
+
+
+def _symbolic_equivalent_worker(predicted: Any, expected: Any, result_queue: "mp.Queue") -> None:
+    try:
+        pred_expr = sp.sympify(_normalize_expression_text(predicted))
+        exp_expr = sp.sympify(_normalize_expression_text(expected))
+        result_queue.put(bool(sp.simplify(pred_expr - exp_expr) == 0))
+    except Exception:
+        result_queue.put(None)
+
+
+def symbolic_equivalent(
+    predicted: Any,
+    expected: Any,
+    timeout_seconds: float = SYMBOLIC_EQUIV_TIMEOUT_SECONDS,
+) -> Optional[bool]:
+    """Return symbolic equivalence when both expressions can be parsed."""
+    if expected in (None, "", "N/A") or predicted in (None, ""):
+        return None
+
+    result_queue: "mp.Queue" = mp.Queue(maxsize=1)
+    process = mp.Process(
+        target=_symbolic_equivalent_worker,
+        args=(predicted, expected, result_queue),
+        daemon=True,
+    )
+    process.start()
+    process.join(timeout_seconds)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+        return None
+
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return None
+
+
+def _has_expected_answer(expected: Any) -> bool:
+    return expected not in (None, "", "N/A")
+
+
+def _is_retryable_infrastructure_error(error: Exception) -> bool:
+    text = str(error)
+    markers = (
+        "429",
+        "RateLimit",
+        "rate limit",
+        "速率限制",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "502",
+        "503",
+        "504",
+    )
+    return any(marker.lower() in text.lower() for marker in markers)
 
 
 # ============================================================
@@ -92,6 +181,7 @@ def create_llm(logger=None):
     model = llm_config.get("model", "gemini-2.0-flash")
     temperature = llm_config.get("temperature", 0.1)
     max_tokens = llm_config.get("max_tokens", 4096)
+    request_timeout = float(llm_config.get("request_timeout", 120))
     
     # Get API Key (based on provider type)
     if provider == "google":
@@ -149,6 +239,7 @@ def create_llm(logger=None):
             "api_key": api_key,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "timeout": request_timeout,
         }
         if base_url:
             llm_kwargs["base_url"] = base_url
@@ -199,7 +290,7 @@ def create_llm(logger=None):
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=base_url,
-            timeout=120.0,  # 120s timeout
+            timeout=request_timeout,
             default_headers={
                 "HTTP-Referer": llm_config.get("site_url", "https://github.com"),
                 "X-Title": llm_config.get("site_name", "TransferFunctionAgent"),
@@ -216,12 +307,19 @@ def create_llm(logger=None):
         # Tongyi Qianwen (OpenAI-compatible API)
         from langchain_openai import ChatOpenAI
         base_url = llm_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        model_kwargs = {
+            "extra_body": {
+                "enable_thinking": bool(llm_config.get("enable_thinking", False)),
+            }
+        }
         llm = ChatOpenAI(
             model=model,
             api_key=api_key,
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=base_url,
+            timeout=request_timeout,
+            model_kwargs=model_kwargs,
         )
         llm_info = f"✅ LLM: {provider}/{model} (base_url: {base_url})"
         print(llm_info)
@@ -256,6 +354,7 @@ def create_llm(logger=None):
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=base_url,
+            timeout=request_timeout,
         )
         llm_info = f"✅ LLM: {provider}/{model} (base_url: {base_url})"
         print(llm_info)
@@ -272,6 +371,7 @@ def create_llm(logger=None):
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=base_url,
+            timeout=request_timeout,
         )
         llm_info = f"✅ LLM: {provider}/{model} (base_url: {base_url})"
         print(llm_info)
@@ -288,6 +388,7 @@ def create_llm(logger=None):
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=base_url,
+            timeout=request_timeout,
         )
         info = f" (base_url: {base_url})" if base_url else ""
         llm_info = f"✅ LLM: {provider}/{model}{info}"
@@ -356,6 +457,9 @@ def run_evaluation(
     max_samples: Optional[int] = None,
     max_retries: int = 3,
     resume: bool = True,
+    start_index: int = 0,
+    end_index: Optional[int] = None,
+    sample_ids: Optional[List[str]] = None,
 ):
     """Run batch evaluation (serial execution, supports breakpoint resumption)
     
@@ -363,9 +467,12 @@ def run_evaluation(
         data_file: Input JSON data file
         output_file: Output JSON result file
         log_file: Log file
-        max_samples: Max number of samples
+        max_samples: Max number of samples after slicing/filtering
         max_retries: Max retries per sample
         resume: Whether to resume from checkpoint (default True)
+        start_index: Inclusive zero-based dataset start index
+        end_index: Exclusive zero-based dataset end index
+        sample_ids: Optional explicit sample IDs to run
     """
     
     # Setup logging
@@ -389,6 +496,20 @@ def run_evaluation(
         samples = data
     else:
         samples = data.get('samples', [])
+    original_count = len(samples)
+    if start_index < 0:
+        raise ValueError("--start-index must be >= 0")
+    if end_index is not None and end_index < start_index:
+        raise ValueError("--end-index must be >= --start-index")
+    slice_start = start_index
+    slice_end = end_index if end_index is not None else len(samples)
+    samples = samples[slice_start:slice_end]
+    selected_sample_ids = set(str(sample_id) for sample_id in (sample_ids or []))
+    if selected_sample_ids:
+        samples = [
+            sample for idx, sample in enumerate(samples)
+            if str(sample.get('id', f'case_{idx + slice_start}')) in selected_sample_ids
+        ]
     if max_samples:
         samples = samples[:max_samples]
     
@@ -397,7 +518,7 @@ def run_evaluation(
     # ============================================================
     checkpoint_file = Path(output_file).with_suffix('.checkpoint.json')
     results = []
-    stats = {"total": 0, "success": 0, "by_level": {}, "by_source": {}}
+    stats = {"total": 0, "success": 0, "by_level": {}, "by_source": {}, "by_type": {}, "by_task": {}}
     start_index = 0
     completed_ids = set()
     
@@ -421,18 +542,37 @@ def run_evaluation(
         except Exception as e:
             logger.warning(f"⚠️ Could not load checkpoint: {e}, starting fresh")
             results = []
-            stats = {"total": 0, "success": 0, "by_level": {}, "by_source": {}}
+            stats = {"total": 0, "success": 0, "by_level": {}, "by_source": {}, "by_type": {}, "by_task": {}}
             start_index = 0
     
     logger.info(f"📂 Data: {data_file}")
-    logger.info(f"📊 Samples: {len(samples)} (starting from {start_index})")
+    logger.info(f"📊 Dataset samples: {original_count} | selected: {len(samples)} (checkpoint start {start_index})")
+    if slice_start or end_index is not None or selected_sample_ids:
+        logger.info(
+            f"🔎 Slice: start_index={slice_start}, end_index={end_index}, "
+            f"sample_ids={sorted(selected_sample_ids) if selected_sample_ids else 'all'}"
+        )
     logger.info(f"📝 Log: {log_file}")
     logger.info(f"💾 Checkpoint: {checkpoint_file}")
     
     # If all already completed
     if start_index >= len(samples):
         logger.info("✅ All samples already completed!")
-        _save_final_results(output_file, data_file, max_retries, stats, results, logger)
+        _save_final_results(
+            output_file,
+            data_file,
+            max_retries,
+            stats,
+            results,
+            logger,
+            {
+                "dataset_total": original_count,
+                "start_index": slice_start,
+                "end_index": end_index,
+                "sample_ids": sorted(selected_sample_ids),
+                "max_samples": max_samples,
+            },
+        )
         return
     
     # Create LLM and Graph
@@ -466,11 +606,9 @@ def run_evaluation(
         expected = sample.get('answer', 'N/A')
         level = sample.get('level', 'unknown')
         source = sample.get('source', 'unknown')
-        provided_netlist = sample.get('netlist')  # Get pre-provided netlist from input
-        
+        sample_type = sample.get('type', 'unknown')
+        task = sample.get('task', sample.get('category', 'unknown'))
         logger.info(f"\n[{i+1}/{len(samples)}] {case_id}")
-        if provided_netlist:
-            logger.info(f"  📋 Input data contains netlist (use_provided_netlist={config.get('ir', {}).get('netlist', {}).get('use_provided_netlist', False)})")
         reasoning_logger.log_case_start(case_id, question, image_path)
         
         try:
@@ -478,8 +616,12 @@ def run_evaluation(
             result = graph.invoke(
                 image_path,
                 question,
-                provided_netlist=provided_netlist,
             )
+            result_error = result.get("error")
+            if result_error and _is_retryable_infrastructure_error(Exception(str(result_error))):
+                logger.error(f"  ❌ Infrastructure error, aborting shard without scoring this sample: {str(result_error)}")
+                logger.error("  Resume this shard later from its checkpoint after the rate limit clears.")
+                raise SystemExit(75)
             
             # Log reasoning (including full classify result)
             reasoning_logger.log_classify(
@@ -503,16 +645,26 @@ def run_evaluation(
                         step.get('observation', '')
                     )
             
-            success = result.get('success', False)
+            pipeline_success = result.get('success', False)
             answer = result.get('answer')
             # Ensure answer is string for JSON serialization
             if answer is not None:
                 answer = str(answer)
+
+            equivalence = symbolic_equivalent(answer, expected)
+            if _has_expected_answer(expected):
+                success = bool(pipeline_success and equivalence is True)
+            else:
+                success = bool(pipeline_success)
             
             reasoning_logger.log_result(success, str(answer) if answer else 'N/A', expected)
             
             if success:
                 logger.info(f"  ✅ {str(answer)[:60]}...")
+            elif pipeline_success and equivalence is False:
+                logger.info(f"  ❌ Symbolic mismatch: predicted {str(answer)[:40]}..., expected {str(expected)[:40]}...")
+            elif pipeline_success and _has_expected_answer(expected) and equivalence is None:
+                logger.info(f"  ❌ Symbolic comparison failed: predicted {str(answer)[:40]}..., expected {str(expected)[:40]}...")
             else:
                 error_msg = result.get('error') or 'Unknown error'
                 logger.info(f"  ❌ {str(error_msg)[:60]}...")
@@ -554,6 +706,7 @@ def run_evaluation(
                     for stage_data in metrics.values() 
                     if isinstance(stage_data, dict)
                 ),
+                "by_stage": metrics,
             }
             
             sample_result = {
@@ -563,9 +716,14 @@ def run_evaluation(
                 "expected_answer": expected,
                 "predicted_answer": answer,
                 "success": success,
+                "pipeline_success": pipeline_success,
+                "symbolic_equivalent": equivalence,
                 "source": source,
                 "level": level,
+                "type": sample_type,
+                "task": task,
                 "ir_type": result.get('ir_type'),
+                "analysis_type": result.get('analysis_type') or task,
                 "error": result.get('error'),
                 "metrics": summary_metrics,
                 "reasoning": {
@@ -580,6 +738,10 @@ def run_evaluation(
             }
         
         except Exception as e:
+            if _is_retryable_infrastructure_error(e):
+                logger.error(f"  ❌ Infrastructure error, aborting shard without scoring this sample: {str(e)}")
+                logger.error("  Resume this shard later from its checkpoint after the rate limit clears.")
+                raise SystemExit(75) from e
             logger.error(f"  ❌ Exception: {str(e)}")
             sample_result = {
                 "id": case_id,
@@ -591,6 +753,9 @@ def run_evaluation(
                 "error": str(e),
                 "source": source,
                 "level": level,
+                "type": sample_type,
+                "task": task,
+                "analysis_type": task,
             }
             success = False
         
@@ -602,7 +767,8 @@ def run_evaluation(
             stats["success"] += 1
         
         # Stats by level/source
-        for key, val in [("by_level", level), ("by_source", source)]:
+        for key, val in [("by_level", level), ("by_source", source), ("by_type", sample_type), ("by_task", task)]:
+            stats.setdefault(key, {})
             if val not in stats[key]:
                 stats[key][val] = {"total": 0, "success": 0}
             stats[key][val]["total"] += 1
@@ -629,7 +795,21 @@ def run_evaluation(
             time_module.sleep(1)  # 1s delay
     
     # Save final results and remove checkpoint
-    _save_final_results(output_file, data_file, max_retries, stats, results, logger)
+    _save_final_results(
+        output_file,
+        data_file,
+        max_retries,
+        stats,
+        results,
+        logger,
+        {
+            "dataset_total": original_count,
+            "start_index": slice_start,
+            "end_index": end_index,
+            "sample_ids": sorted(selected_sample_ids),
+            "max_samples": max_samples,
+        },
+    )
     
     # Delete checkpoint file
     try:
@@ -641,7 +821,8 @@ def run_evaluation(
 
 
 def _save_final_results(output_file: str, data_file: str, max_retries: int, 
-                        stats: Dict, results: List, logger: logging.Logger):
+                        stats: Dict, results: List, logger: logging.Logger,
+                        run_slice: Optional[Dict[str, Any]] = None):
     """Save final results and output statistical info"""
     
     # Summarize metrics
@@ -652,6 +833,28 @@ def _save_final_results(output_file: str, data_file: str, max_retries: int,
     
     for r in results:
         metrics = r.get("metrics", {})
+        if "total_duration_seconds" in metrics:
+            total_duration += metrics.get("total_duration_seconds", 0)
+            total_tokens["input_tokens"] += metrics.get("total_input_tokens", 0)
+            total_tokens["output_tokens"] += metrics.get("total_output_tokens", 0)
+            total_tokens["total_tokens"] += metrics.get("total_tokens", 0)
+            total_llm_calls += metrics.get("total_llm_calls", 0)
+            for stage_name, stage_data in (metrics.get("by_stage") or {}).items():
+                if isinstance(stage_data, dict):
+                    if stage_name not in stage_totals:
+                        stage_totals[stage_name] = {
+                            "duration_seconds": 0,
+                            "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                            "llm_calls": 0,
+                        }
+                    stage_totals[stage_name]["duration_seconds"] += stage_data.get("duration_seconds", 0)
+                    tokens = stage_data.get("tokens", {})
+                    if isinstance(tokens, dict):
+                        stage_totals[stage_name]["tokens"]["input_tokens"] += tokens.get("input_tokens", 0)
+                        stage_totals[stage_name]["tokens"]["output_tokens"] += tokens.get("output_tokens", 0)
+                        stage_totals[stage_name]["tokens"]["total_tokens"] += tokens.get("total_tokens", 0)
+                    stage_totals[stage_name]["llm_calls"] += stage_data.get("llm_calls", 0)
+            continue
         for stage_name, stage_data in metrics.items():
             if isinstance(stage_data, dict):
                 total_duration += stage_data.get("duration_seconds", 0)
@@ -692,6 +895,18 @@ def _save_final_results(output_file: str, data_file: str, max_retries: int,
         for lvl, s in sorted(stats["by_level"].items()):
             rate = s['success'] / s['total'] * 100 if s['total'] > 0 else 0
             logger.info(f"  {lvl:12} {s['success']:3}/{s['total']:3} ({rate:.1f}%)")
+
+        if stats.get("by_type"):
+            logger.info("\nBy Type:")
+            for typ, s in sorted(stats["by_type"].items()):
+                rate = s['success'] / s['total'] * 100 if s['total'] > 0 else 0
+                logger.info(f"  {typ:12} {s['success']:3}/{s['total']:3} ({rate:.1f}%)")
+
+        if stats.get("by_task"):
+            logger.info("\nBy Task:")
+            for task, s in sorted(stats["by_task"].items()):
+                rate = s['success'] / s['total'] * 100 if s['total'] > 0 else 0
+                logger.info(f"  {task:12} {s['success']:3}/{s['total']:3} ({rate:.1f}%)")
         
         logger.info("\n" + "-" * 60)
         logger.info("METRICS")
@@ -715,6 +930,7 @@ def _save_final_results(output_file: str, data_file: str, max_retries: int,
         "config": {
             "data_file": str(data_file),
             "max_retries": max_retries,
+            "slice": run_slice or {},
         },
         "statistics": {
             "total": stats["total"],
@@ -722,6 +938,8 @@ def _save_final_results(output_file: str, data_file: str, max_retries: int,
             "success_rate": stats["success"] / stats["total"] * 100 if stats["total"] > 0 else 0,
             "by_source": stats["by_source"],
             "by_level": stats["by_level"],
+            "by_type": stats.get("by_type", {}),
+            "by_task": stats.get("by_task", {}),
         },
         "metrics_summary": {
             "total_duration_seconds": round(total_duration, 2),
@@ -749,15 +967,14 @@ def show_graph(output_file: Optional[str] = None):
     print("TransferFunctionAgent - LangGraph Multi-Agent Workflow")
     print("=" * 80)
     
-    # Create a dummy LLM
-    class DummyLLM:
+    class GraphPreviewLLM:
         def invoke(self, *args, **kwargs):
             return type('R', (), {'content': '{}'})()
         def bind_tools(self, *args, **kwargs):
             return self
     
     from src.graph import create_graph
-    graph = create_graph(DummyLLM(), max_retries=3)
+    graph = create_graph(GraphPreviewLLM(), max_retries=3)
     
     # Print Mermaid Graph
     print("\n📊 Main Graph (Mermaid):\n")
@@ -784,15 +1001,14 @@ def show_graph(output_file: Optional[str] = None):
 def show_solve_graph(output_file: Optional[str] = None):
     """Show LangGraph structure of Solve subgraph"""
     
-    # Create a dummy LLM
-    class DummyLLM:
+    class GraphPreviewLLM:
         def invoke(self, *args, **kwargs):
             return type('R', (), {'content': '{}', 'tool_calls': []})()
         def bind_tools(self, *args, **kwargs):
             return self
     
     from src.nodes.netlist.solve import create_netlist_react_subgraph
-    solve_graph = create_netlist_react_subgraph(DummyLLM())
+    solve_graph = create_netlist_react_subgraph(GraphPreviewLLM())
     
     # Get Graph Structure
     try:
@@ -856,14 +1072,13 @@ def show_solve_graph(output_file: Optional[str] = None):
 # ============================================================
 # Single Problem Solve
 # ============================================================
-def solve_single(image_path: str, question: str, max_retries: int = 3, provided_netlist: str = None):
+def solve_single(image_path: str, question: str, max_retries: int = 3):
     """Solve a single problem
     
     Args:
         image_path: Path to circuit/image
         question: Question text
         max_retries: Max number of retries
-        provided_netlist: Pre-provided netlist (skips LLM generation if present)
     """
     
     print("\n" + "=" * 60)
@@ -872,8 +1087,6 @@ def solve_single(image_path: str, question: str, max_retries: int = 3, provided_
     
     print(f"\n📷 Image: {image_path}")
     print(f"❓ Question: {question}")
-    if provided_netlist:
-        print(f"📋 Using provided netlist: {provided_netlist}")
     
     llm = create_llm()
     print(f"✅ LLM: {llm.model_name if hasattr(llm, 'model_name') else llm.model}")
@@ -887,7 +1100,6 @@ def solve_single(image_path: str, question: str, max_retries: int = 3, provided_
     initial_state = {
         "image_path": image_path,
         "question": question,
-        "provided_netlist": provided_netlist,
         "ir_type": None,
         "input_source": None,
         "output_node": None,
@@ -964,6 +1176,12 @@ def main():
     parser.add_argument("--log", "-l", default="reasoning.log", 
                         help="Reasoning log file (saved in output/)")
     parser.add_argument("--max-samples", "-n", type=int, help="Max samples (for batch mode)")
+    parser.add_argument("--start-index", type=int, default=0,
+                        help="Inclusive zero-based dataset start index for batch mode")
+    parser.add_argument("--end-index", type=int,
+                        help="Exclusive zero-based dataset end index for batch mode")
+    parser.add_argument("--sample-id", action="append", dest="sample_ids",
+                        help="Run only this sample ID after index slicing. Repeatable.")
     parser.add_argument("--max-retries", type=int, default=3, help="Max retries")
     parser.add_argument("--no-resume", action="store_true", 
                         help="Don't resume from checkpoint, start fresh")
@@ -986,6 +1204,9 @@ def main():
             max_samples=args.max_samples,
             max_retries=args.max_retries,
             resume=not args.no_resume,
+            start_index=args.start_index,
+            end_index=args.end_index,
+            sample_ids=args.sample_ids,
         )
     elif args.run_type == "graph":
         # Show workflow graph

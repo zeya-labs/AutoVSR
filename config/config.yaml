@@ -8,8 +8,9 @@ llm:
   # Provider options: google, openai, azure, openrouter, qwen, anthropic, glm
   provider: "glm"
   model: "glm-4.6v-flashx"
-  temperature: 1
+  temperature: 0
   max_tokens: 4096
+  request_timeout: 120
   base_url: "https://open.bigmodel.cn/api/paas/v4/"
   api_key: "624cbf55af4d410da595ec0f008feae7.KXSI4QpyCAM41zRK"
 
@@ -65,9 +66,6 @@ ir:
   netlist:
     require_ground: true
     require_source: true
-    # Public examples include netlists so tests are reproducible.
-    # Set false to force visual netlist extraction from the image.
-    use_provided_netlist: false
 
 logging:
   level: "INFO"

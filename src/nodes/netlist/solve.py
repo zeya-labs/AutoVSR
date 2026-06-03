@@ -268,6 +268,9 @@ class NetlistReActAgentNodes:
         self.tools = {}
         self.tools_by_name = {}
 
+    def _bind_tools_if_any(self, tools: List[Any]):
+        return self.llm.bind_tools(tools) if tools else self.llm
+
     def _is_transient_response(self, state: NetlistReActState) -> bool:
         """Return True when this netlist problem asks for an absolute s-domain response."""
         if state.get("analysis_type") == "transient_response":
@@ -524,7 +527,7 @@ class NetlistReActAgentNodes:
         
         # Bind tools so LLM knows available tools
         tools = [self.tools_by_name[name] for name in self.tools_by_name]
-        llm_with_tools = self.llm.bind_tools(tools)
+        llm_with_tools = self._bind_tools_if_any(tools)
         
         start_time = time.time()
         response = llm_with_tools.invoke(state["messages"] + [plan_message])
@@ -830,7 +833,7 @@ Tool Results:
             tools = [self.tools_by_name[planned_tool]]
         else:
             tools = [self.tools_by_name[name] for name in state["available_tools"] if name in self.tools_by_name]
-        llm_with_tools = self.llm.bind_tools(tools)
+        llm_with_tools = self._bind_tools_if_any(tools)
         
         start_time = time.time()
         response = llm_with_tools.invoke(state["messages"] + [execute_message])

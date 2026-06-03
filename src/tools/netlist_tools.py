@@ -106,7 +106,7 @@ class LcapySolver:
 
         try:
             # Use subprocess protection, prevent timeout
-            code = f"str(cct['{target}'].V.simplify())"
+            code = f"str(cct['{target}'].V.s.simplify())"
             v_str = self._safe_call("get_voltage", code)
             return {
                 "success": True,
@@ -125,7 +125,7 @@ class LcapySolver:
 
         try:
             # Use subprocess protection, prevent timeout
-            code = f"str(cct['{element}'].I.simplify())"
+            code = f"str(cct['{element}'].I.s.simplify())"
             i_str = self._safe_call("get_current", code)
             return {
                 "success": True,
@@ -547,6 +547,33 @@ def create_netlist_tools(ir_dict: Dict[str, Any]):
             return f"H(s) = {result['transfer_function']}"
         return f"Error: {result['error']}"
 
+    @tool
+    def solve_node_voltage(node: str) -> str:
+        """Solve for node voltage Vn<node>(s) in the s-domain."""
+        target = str(node).strip()
+        if not target:
+            target = "1"
+        target = target.removeprefix("Vn").removeprefix("vn")
+        result = solver.get_voltage(target)
+        if result["success"]:
+            return f"Vn{target}(s) = {result['voltage']}"
+        return f"Error: {result['error']}"
+
+    @tool
+    def solve_branch_current(target: str) -> str:
+        """Solve for branch current such as iv1, il1, or ieint1 in the s-domain."""
+        raw = str(target).strip() or "iv1"
+        match = re.fullmatch(r"[Vv](\d+)", raw)
+        element = f"V{match.group(1)}" if match else raw
+        if raw.lower().startswith("iv"):
+            element = f"V{raw[2:]}"
+        elif raw.lower().startswith("il"):
+            element = f"L{raw[2:]}"
+        result = solver.get_current(element)
+        if result["success"]:
+            return f"{raw}(s) = {result['current']}"
+        return f"Error: {result['error']}"
+
 
     return  [
 
@@ -560,5 +587,7 @@ def create_netlist_tools(ir_dict: Dict[str, Any]):
         # # ============================================================
         get_voltage,            # Node/element voltage V(x)
         get_current,            # Element current I(x)
+        solve_node_voltage,
+        solve_branch_current,
 
     ]

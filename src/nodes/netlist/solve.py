@@ -75,6 +75,10 @@ def is_valid_final_answer(answer: str) -> bool:
         "step 3",
         "step 4",
         "step 5",
+        "no tool called",
+        "invalid tool name",
+        "skipped after",
+        "tool returned an error",
     ]
     
     for pattern in invalid_patterns:
@@ -83,6 +87,40 @@ def is_valid_final_answer(answer: str) -> bool:
             return False
     
     return True
+
+
+def extract_final_answer(text: str) -> Optional[str]:
+    """Extract the last explicit `FINAL ANSWER:` line from model output."""
+    if not text:
+        return None
+
+    matches = re.findall(
+        r"FINAL\s+ANSWER\s*:\s*(.+?)(?:\n|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for candidate in reversed(matches):
+        answer = candidate.strip()
+        if is_valid_final_answer(answer):
+            return answer
+    return None
+
+
+def normalize_final_answer(answer: Optional[str], analysis_type: Optional[str] = None) -> Optional[str]:
+    """Normalize final expressions without using ground-truth answers."""
+    if not answer:
+        return answer
+
+    normalized = re.sub(r"\b([xy])(\d+)\b", r"\1_\2", answer)
+
+    if analysis_type == "transient_response" and "=" in normalized:
+        lhs, rhs = normalized.split("=", 1)
+        # Only normalize independent source labels on the RHS. Keep left-hand
+        # labels such as Vn1(s), IL1(s), and IV1(s) intact.
+        rhs = re.sub(r"\b([VI]\d+)\s*\(\s*s\s*\)", r"\1/s", rhs)
+        normalized = f"{lhs.strip()} = {rhs.strip()}"
+
+    return normalized
 
 
 def print_step_header(step_num: int):
@@ -791,13 +829,12 @@ Tool Results:
             thought = extract_text_content(response.content)
             final_answer = None
             
-            if "FINAL ANSWER:" in thought.upper():
-                match = re.search(r'FINAL ANSWER[:\s]*(.+?)(?:\n|$)', thought, re.IGNORECASE | re.DOTALL)
-                if match:
-                    final_answer = match.group(1).strip()
+            final_answer = extract_final_answer(thought)
             
             if final_answer:
                 print_final_answer(final_answer)
+            else:
+                print(f"{TerminalColors.YELLOW}⚠️ Final answer step did not produce a valid answer.{TerminalColors.END}")
             
             plan[current_idx]["status"] = "completed"
             plan[current_idx]["result"] = final_answer or thought
@@ -816,7 +853,7 @@ Tool Results:
                 )],
                 "plan": plan,
                 "final_answer": final_answer,
-                "is_finished": True,
+                "is_finished": final_answer is not None,
             }
         else:
             execute_message = HumanMessage(content=EXECUTE_PROMPT.format(
@@ -863,15 +900,10 @@ Tool Results:
                 print(f"   Args: {json.dumps(action_input)}")
         
         # Check for final answer
-        if "FINAL ANSWER:" in thought.upper():
-            match = re.search(r'FINAL ANSWER[:\s]*(.+?)(?:\n|$)', thought, re.IGNORECASE | re.DOTALL)
-            if match:
-                candidate_answer = match.group(1).strip()
-                # Verify if it's a valid final answer (not transitional text)
-                if is_valid_final_answer(candidate_answer):
-                    final_answer = candidate_answer
-                    is_finished = True
-                    print_final_answer(final_answer)
+        final_answer = extract_final_answer(thought) if not planned_tool else None
+        if final_answer:
+            is_finished = True
+            print_final_answer(final_answer)
         
         if thought:
             print_thought(thought)
@@ -954,7 +986,12 @@ Tool Results:
         # 2. Simple judgment: if tool doesn't report Error, proceed to next step
         # ============================================================
         # No longer using LLM Judge to avoid misjudgment and extra token consumption
-        has_error = observation.strip().startswith("Error:")
+        observation_lower = observation.strip().lower()
+        has_error = (
+            observation.strip().startswith("Error:")
+            or "no tool called" in observation_lower
+            or "invalid tool name" in observation_lower
+        )
         
         # step_retry_count: Number of retries already performed (0 means this is the 1st call)
         # When step_retry_count + 1 >= max_step_retries, this is the last chance
@@ -1127,7 +1164,7 @@ def solve_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
             "success": False,
             "error": "No IR available for solving",
         }
-    
+
     # Build and run agent
     try:
         agent = create_netlist_react_subgraph(llm, max_steps=10)
@@ -1156,7 +1193,10 @@ def solve_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
         result = agent.invoke(initial_state)
         
         # Extract answer
-        final_answer = result.get("final_answer")
+        final_answer = normalize_final_answer(
+            result.get("final_answer"),
+            analysis_type=state.get("analysis_type"),
+        )
         solve_steps = [
             {
                 "thought": s.get("thought", ""),

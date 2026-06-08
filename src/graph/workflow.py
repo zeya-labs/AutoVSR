@@ -7,7 +7,7 @@ Builds the transfer function analysis graph with:
 - Netlist solve node
 
 Supports configuration-based flow control:
-- use_provided_netlist: Skip LLM generation when netlist is provided
+- use_provided_netlist: Skip LLM generation for an explicit caller-provided netlist
 """
 
 from typing import Dict, Any
@@ -145,7 +145,7 @@ class TransferFunctionGraph:
             image_path: Path to the image
             question: Question to answer
             config: Optional LangGraph config
-            provided_netlist: Pre-provided netlist from input data (skip LLM generation if present)
+            provided_netlist: Explicit caller-provided netlist (skip LLM generation if enabled)
         
         Returns:
             Final state with answer

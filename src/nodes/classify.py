@@ -205,6 +205,33 @@ def classify_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
     provided_netlist = state.get("provided_netlist")
     image_path = state["image_path"]
     question = state["question"]
+
+    if use_provided_netlist and provided_netlist:
+        q = (question or "").lower()
+        analysis_type = "transfer_function" if "transfer function" in q else "transient_response"
+        output_node = None
+        node_match = re.search(r"\bnode\s+(\d+)\b", q)
+        if node_match:
+            output_node = node_match.group(1)
+        element_match = re.search(r"\bto\s+([RLC]\d+)\b", question or "", re.IGNORECASE)
+        if element_match:
+            output_node = element_match.group(1).upper()
+        metrics = {
+            "classify": {
+                "duration_seconds": 0,
+                "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "llm_calls": 0,
+            }
+        }
+        return {
+            "ir_type": "netlist",
+            "analysis_type": analysis_type,
+            "input_source": "V1",
+            "output_node": output_node,
+            "constraints": None,
+            "detected_components": None,
+            "metrics": {**state.get("metrics", {}), **metrics},
+        }
     
     # encode image (both stages may use)
     image_data, media_type = _encode_image(image_path)

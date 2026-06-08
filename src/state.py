@@ -25,7 +25,7 @@ class TransferFunctionState(TypedDict):
     # === Input ===
     image_path: str                    # Path to the circuit/diagram image
     question: str                      # The question to answer
-    provided_netlist: Optional[str]    # Pre-provided netlist from input data (skip LLM generation if present)
+    provided_netlist: Optional[str]    # Explicit caller-provided netlist (skip LLM generation if enabled)
     
     # === Classification Result ===
     ir_type: Literal["sfg", "netlist", None]  # Type of IR to generate
@@ -63,7 +63,7 @@ def create_initial_state(
         image_path: Path to the circuit/diagram image
         question: The question to answer
         max_retries: Reserved for compatibility with existing callers
-        provided_netlist: Pre-provided netlist from input data (skip LLM generation if present)
+        provided_netlist: Explicit caller-provided netlist (skip LLM generation if enabled)
     """
     return TransferFunctionState(
         # Input

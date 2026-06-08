@@ -11,7 +11,9 @@ from typing import Any, Dict, List
 import multiprocessing as mp
 import os
 import re
+import signal
 import warnings
+from contextlib import contextmanager
 
 from langchain_core.tools import tool
 
@@ -35,6 +37,20 @@ except Exception:
 
 class TimeoutError(Exception):
     pass
+
+
+@contextmanager
+def _alarm_timeout(seconds: int, message: str):
+    def _handle_timeout(signum, frame):
+        raise TimeoutError(message)
+
+    previous_handler = signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 # ============================================================
@@ -144,6 +160,176 @@ class LcapySolver:
     def _compute_transfer(self, n1p, n1m, n2p, n2m):
         """Call Lcapy transfer() directly - use subprocess to handle recursion and timeout"""
         return self._safe_lcapy_call("transfer", n1p, n1m, n2p, n2m)
+
+    def _compute_resistive_element_transfer(self, output_element: str, input_source: str) -> Dict[str, str]:
+        """Compute V(output_element) / V(input_source) with symbolic MNA.
+
+        Lcapy's transfer() can return misleading constants for some floating
+        resistive subgraphs. This path solves the driven circuit directly.
+        """
+        import sympy as sp
+
+        elements = []
+        nodes = set()
+        for raw_line in self.netlist.strip().splitlines():
+            line = raw_line.split(";", 1)[0].strip()
+            if not line or line.startswith(("*", "#")):
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            name = parts[0]
+            kind = name[0].upper()
+            if kind not in {"R", "V"}:
+                raise ValueError("symbolic MNA fallback only supports R and V elements")
+            n_plus, n_minus = str(parts[1]), str(parts[2])
+            value = parts[3]
+            elements.append((name, kind, n_plus, n_minus, value))
+            nodes.update([n_plus, n_minus])
+
+        output = next((elem for elem in elements if elem[0].lower() == output_element.lower()), None)
+        source = next((elem for elem in elements if elem[0].lower() == input_source.lower()), None)
+        if not output:
+            raise ValueError(f"Output element not found: {output_element}")
+        if not source or source[1] != "V":
+            raise ValueError(f"Input voltage source not found: {input_source}")
+
+        protected_nodes = {source[2], source[3], output[2], output[3], "0"}
+        internal_graph = {}
+        for name, kind, n_plus, n_minus, _ in elements:
+            if kind != "R":
+                continue
+            for node, other in ((n_plus, n_minus), (n_minus, n_plus)):
+                if node not in protected_nodes and other not in protected_nodes:
+                    internal_graph.setdefault(node, set()).add(other)
+                elif node not in protected_nodes:
+                    internal_graph.setdefault(node, set())
+
+        pruned_internal_nodes = set()
+        seen_internal_nodes = set()
+        for start in list(internal_graph):
+            if start in seen_internal_nodes:
+                continue
+            stack = [start]
+            component = set()
+            boundaries = set()
+            while stack:
+                node = stack.pop()
+                if node in seen_internal_nodes:
+                    continue
+                seen_internal_nodes.add(node)
+                component.add(node)
+                for _, kind, n_plus, n_minus, _ in elements:
+                    if kind != "R" or node not in (n_plus, n_minus):
+                        continue
+                    other = n_minus if node == n_plus else n_plus
+                    if other in protected_nodes:
+                        boundaries.add(other)
+                    elif other not in seen_internal_nodes:
+                        stack.append(other)
+            if len(boundaries) <= 1:
+                pruned_internal_nodes.update(component)
+
+        if pruned_internal_nodes:
+            elements = [
+                elem for elem in elements
+                if elem[1] != "R" or (elem[2] not in pruned_internal_nodes and elem[3] not in pruned_internal_nodes)
+            ]
+            nodes = {node for _, _, n_plus, n_minus, _ in elements for node in (n_plus, n_minus)}
+
+        if len(voltage_sources := [elem for elem in elements if elem[1] == "V"]) == 1:
+            _, _, src_plus, src_minus, _ = source
+            if src_plus == "0" or src_minus == "0":
+                known_voltages = {"0": sp.Integer(0)}
+                known_voltages[src_minus if src_plus == "0" else src_plus] = sp.Integer(-1 if src_plus == "0" else 1)
+                unknown_nodes = sorted(
+                    (node for node in nodes if node not in known_voltages),
+                    key=lambda item: (not item.isdigit(), int(item) if item.isdigit() else item),
+                )
+                node_index = {node: idx for idx, node in enumerate(unknown_nodes)}
+                if unknown_nodes:
+                    A = sp.zeros(len(unknown_nodes), len(unknown_nodes))
+                    b = sp.zeros(len(unknown_nodes), 1)
+                    for _, kind, n_plus, n_minus, value in elements:
+                        if kind != "R":
+                            continue
+                        conductance = 1 / sp.Symbol(value)
+                        for node, other in ((n_plus, n_minus), (n_minus, n_plus)):
+                            idx = node_index.get(node)
+                            if idx is None:
+                                continue
+                            A[idx, idx] += conductance
+                            other_idx = node_index.get(other)
+                            if other_idx is not None:
+                                A[idx, other_idx] -= conductance
+                            else:
+                                b[idx, 0] += conductance * known_voltages.get(other, 0)
+                    solution = A.LUsolve(b)
+                else:
+                    solution = []
+
+                def solved_voltage(node: str):
+                    if node in known_voltages:
+                        return known_voltages[node]
+                    return solution[node_index[node], 0]
+
+                _, _, out_plus, out_minus, _ = output
+                tf = sp.factor(sp.cancel(solved_voltage(out_plus) - solved_voltage(out_minus)))
+                return {
+                    "transfer_function": str(tf),
+                    "input_nodes": f"{src_plus}-{src_minus}",
+                    "output_nodes": f"{out_plus}-{out_minus}",
+                }
+
+        node_names = sorted((node for node in nodes if node != "0"), key=lambda item: (not item.isdigit(), int(item) if item.isdigit() else item))
+        node_index = {node: idx for idx, node in enumerate(node_names)}
+        source_index = {elem[0]: len(node_names) + idx for idx, elem in enumerate(voltage_sources)}
+        size = len(node_names) + len(voltage_sources)
+        if size == 0:
+            raise ValueError("No unknowns in circuit")
+
+        A = sp.zeros(size, size)
+        b = sp.zeros(size, 1)
+
+        def node_var(node: str):
+            return node_index.get(node)
+
+        for name, kind, n_plus, n_minus, value in elements:
+            p_idx = node_var(n_plus)
+            m_idx = node_var(n_minus)
+            if kind == "R":
+                conductance = 1 / sp.Symbol(value)
+                if p_idx is not None:
+                    A[p_idx, p_idx] += conductance
+                if m_idx is not None:
+                    A[m_idx, m_idx] += conductance
+                if p_idx is not None and m_idx is not None:
+                    A[p_idx, m_idx] -= conductance
+                    A[m_idx, p_idx] -= conductance
+            elif kind == "V":
+                v_idx = source_index[name]
+                if p_idx is not None:
+                    A[p_idx, v_idx] += 1
+                    A[v_idx, p_idx] += 1
+                if m_idx is not None:
+                    A[m_idx, v_idx] -= 1
+                    A[v_idx, m_idx] -= 1
+                b[v_idx, 0] = 1 if name.lower() == input_source.lower() else 0
+
+        solution = A.LUsolve(b)
+
+        def voltage(node: str):
+            idx = node_var(node)
+            return 0 if idx is None else solution[idx, 0]
+
+        _, _, src_plus, src_minus, _ = source
+        _, _, out_plus, out_minus, _ = output
+        tf = sp.factor(sp.cancel(voltage(out_plus) - voltage(out_minus)))
+        return {
+            "transfer_function": str(tf),
+            "input_nodes": f"{src_plus}-{src_minus}",
+            "output_nodes": f"{out_plus}-{out_minus}",
+        }
 
 
     def _safe_call(self, operation_name: str, callable_code: str, timeout_sec=None) -> Any:
@@ -271,6 +457,21 @@ class LcapySolver:
             return {"success": False, "error": "Circuit not loaded"}
 
         input_source = input_source or self.input_source
+
+        try:
+            with _alarm_timeout(5, "symbolic MNA fallback timed out"):
+                mna_result = self._compute_resistive_element_transfer(output_element, input_source)
+            return {
+                "success": True,
+                "transfer_function": mna_result["transfer_function"],
+                "input": input_source,
+                "input_nodes": mna_result["input_nodes"],
+                "output_element": output_element,
+                "output_nodes": mna_result["output_nodes"],
+                "method": "symbolic_mna",
+            }
+        except Exception:
+            pass
 
         
         # Get input source nodes

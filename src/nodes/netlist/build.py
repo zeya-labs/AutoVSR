@@ -173,6 +173,11 @@ def print_generated_ir(netlist: str, input_info: Dict[str, Any] = None, output_i
 NETLIST_BUILD_SYSTEM_PROMPT = """You are an expert in electronic circuit analysis.
 
 {rules}
+
+Polarity is part of the answer. Preserve the schematic direction exactly:
+- For independent voltage sources, the first node in `Vname Np Nm ...` must be the drawn `+` terminal and the second node must be the drawn `-` terminal.
+- For a passive element used as the requested output, list its first node at the drawn `+`/reference side if the diagram marks one. Do not swap two-terminal element nodes casually; reversing them changes the sign of transfer functions and node responses.
+- Use the component name as the source symbol. For example, write `V1 ... s V1` or `V1 ... step V1`, not `Vin`, when the source component is labeled V1.
 """
 
 
@@ -249,6 +254,7 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
         netlist = provided_netlist
         content = f"```netlist\n{netlist}\n```"  # For subsequent I/O extraction
         token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        build_llm_calls = 0
     else:
         # Terminal output - Build title
         print_build_header(is_retry=False)
@@ -305,6 +311,7 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
         # Call LLM
         response = llm.invoke(messages)
         content = extract_text_content(response.content)
+        build_llm_calls = 1
         
         # Extract token usage
         token_usage = _extract_token_usage(response)
@@ -356,9 +363,14 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
     # # Auto-fix invalid source types (square → step, etc.)
     # netlist = _fix_invalid_source_types(netlist)
     
-    # # Auto-fix netlist sources to use s-domain
-    # netlist = _fix_netlist_sources(netlist)
-    
+    # Transient-response labels in CircuitSense are s-domain step responses:
+    # a source labeled V1 should enter Lcapy as a step source so the result
+    # includes the expected 1/s factor.
+    if analysis_type == "transient_response":
+        netlist = _fix_transient_source_domains(netlist)
+    else:
+        netlist = _fix_netlist_sources(netlist)
+
     # # Auto-fix wire components (W has no value)
     # netlist = _fix_wire_components(netlist)
     
@@ -485,7 +497,7 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
     existing_metrics["build"]["tokens"]["input_tokens"] += token_usage["input_tokens"]
     existing_metrics["build"]["tokens"]["output_tokens"] += token_usage["output_tokens"]
     existing_metrics["build"]["tokens"]["total_tokens"] += token_usage["total_tokens"]
-    existing_metrics["build"]["llm_calls"] += 1
+    existing_metrics["build"]["llm_calls"] += build_llm_calls
     
     result["metrics"] = existing_metrics
     
@@ -1114,6 +1126,12 @@ def _fix_netlist_sources(netlist: str) -> str:
         s_lower = s.lower()
         # Check for time-domain indicators: sin, cos, omega, t
         return any(indicator in s_lower for indicator in ['sin', 'cos', 'omega', 't', 'exp'])
+
+    def _source_symbol(comp_id: str, value: str) -> str:
+        value = str(value).strip()
+        if re.fullmatch(r'[A-Za-z]\w*', value) and comp_id.upper().startswith(("V", "I")):
+            return comp_id
+        return value
     
     for line in lines:
         line = line.strip()
@@ -1135,7 +1153,7 @@ def _fix_netlist_sources(netlist: str) -> str:
                 continue
             # If it's a simple symbol (no operators), convert to s-domain
             elif re.match(r'^\w+$', expr.strip()):
-                symbol = re.sub(r'\([st]\)', '', expr)
+                symbol = _source_symbol(comp_id, re.sub(r'\([st]\)', '', expr))
                 if comp_id.lower().startswith('vsense') or _is_zero_literal(symbol):
                     fixed_line = f"{comp_id} {node1} {node2} 0"
                 else:
@@ -1157,6 +1175,7 @@ def _fix_netlist_sources(netlist: str) -> str:
         match = re.match(r'^([VI]\w*)\s+(\w+)\s+(\w+)\s+ac\s+(\S+)(.*)$', line, re.IGNORECASE)
         if match:
             comp_id, node1, node2, symbol, rest = match.groups()
+            symbol = _source_symbol(comp_id, symbol)
             # ⚠️ Lcapy s-domain source only accepts ONE value, not "amplitude phase"
             # If rest contains additional values (like phase), ignore them
             if comp_id.lower().startswith('vsense') or _is_zero_literal(symbol):
@@ -1172,6 +1191,7 @@ def _fix_netlist_sources(netlist: str) -> str:
         match = re.match(r'^([VI]\w*)\s+(\w+)\s+(\w+)\s+(\w+)$', line, re.IGNORECASE)
         if match:
             comp_id, node1, node2, value = match.groups()
+            value = _source_symbol(comp_id, value)
             # If value is not a domain specifier (dc/ac/s/step), add s
             if value.lower() not in ['dc', 'ac', 's', 'step']:
                 if comp_id.lower().startswith('vsense') or _is_zero_literal(value):
@@ -1184,6 +1204,63 @@ def _fix_netlist_sources(netlist: str) -> str:
         fixed_lines.append(line)
     
     return '\n'.join(fixed_lines)
+
+
+def _fix_transient_source_domains(netlist: str) -> str:
+    """Normalize independent sources for CircuitSense s-domain transient responses.
+
+    CircuitSense transient targets model labeled independent sources as step
+    inputs, so V1/I1 should be represented by V1/s or I1/s in the s-domain.
+    Lcapy accepts this as `step value`.
+    """
+    fixed_lines = []
+    domain_tokens = {"dc", "ac", "s", "step"}
+
+    def _source_symbol(comp_id: str, value: str) -> str:
+        value = str(value).strip()
+        if re.fullmatch(r'[A-Za-z]\w*', value) and comp_id.upper().startswith(("V", "I")):
+            return comp_id
+        return value
+
+    for original_line in netlist.strip().split("\n"):
+        line = original_line.strip()
+        if not line or line.startswith("*") or line.startswith(";"):
+            fixed_lines.append(original_line)
+            continue
+
+        parts = line.split()
+        if len(parts) < 3 or not parts[0].upper().startswith(("V", "I")):
+            fixed_lines.append(original_line)
+            continue
+
+        comp_id, node1, node2 = parts[:3]
+        rest = parts[3:]
+        if comp_id.lower().startswith("vsense"):
+            fixed_lines.append(original_line)
+            continue
+
+        if not rest:
+            fixed_lines.append(f"{comp_id} {node1} {node2} step {comp_id}")
+            continue
+
+        first = rest[0]
+        first_lower = first.lower()
+        if first_lower == "step":
+            fixed_lines.append(original_line)
+            continue
+
+        if first_lower in {"s", "ac", "dc"}:
+            value = _source_symbol(comp_id, rest[1] if len(rest) > 1 else comp_id)
+            fixed_lines.append(f"{comp_id} {node1} {node2} step {value}")
+            continue
+
+        if first.startswith("{") or first_lower in domain_tokens:
+            fixed_lines.append(original_line)
+            continue
+
+        fixed_lines.append(f"{comp_id} {node1} {node2} step {_source_symbol(comp_id, first)}")
+
+    return "\n".join(fixed_lines)
 
 
 def _fix_wire_components(netlist: str) -> str:

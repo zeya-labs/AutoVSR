@@ -50,6 +50,10 @@ def _normalize_expression_text(expr: Any) -> str:
     text = text.replace("^", "**")
     text = text.replace("\\cdot", "*")
     text = text.replace("{", "(").replace("}", ")")
+    # CircuitSense controlled-source parameters are labeled x_1/y_1 in
+    # references, while models often emit x1/y1. Normalize only these gain
+    # labels, not component names such as R1/C1/L1/V1.
+    text = re.sub(r"\b([xy])(\d+)\b", r"\1_\2", text)
     # CircuitSense/SFG answers often use labels like G(s), H1(s), or V1(s)
     # as symbolic block/source names rather than callable functions.
     known_functions = {
@@ -117,6 +121,9 @@ def _is_retryable_infrastructure_error(error: Exception) -> bool:
         "timeout",
         "timed out",
         "temporarily unavailable",
+        "Access denied",
+        "Arrearage",
+        "overdue-payment",
         "502",
         "503",
         "504",

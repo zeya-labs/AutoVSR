@@ -6,13 +6,13 @@
 llm:
   # Default public test configuration.
   # Provider options: google, openai, azure, openrouter, qwen, anthropic, glm
-  provider: "glm"
-  model: "glm-4.6v-flashx"
+  provider: "qwen"
+  model: "qwen3-vl-plus"
   temperature: 0
   max_tokens: 4096
   request_timeout: 120
-  base_url: "https://open.bigmodel.cn/api/paas/v4/"
-  api_key: "624cbf55af4d410da595ec0f008feae7.KXSI4QpyCAM41zRK"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: ""
 
   # Google Gemini example
   # provider: "google"
@@ -64,6 +64,7 @@ solver:
 
 ir:
   netlist:
+    use_provided_netlist: false
     require_ground: true
     require_source: true
 

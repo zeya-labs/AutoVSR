@@ -22,9 +22,13 @@ PAPER_TARGETS = {
         "type4": 511,
         "type5": 228,
     },
-    "glm_4_6v_flash": {
-        "transfer_function_accuracy": 49.85,
-        "transient_response_accuracy": 63.25,
+    "overall_accuracy": 68.02,
+    "type_accuracy": {
+        "type1": 92.77,
+        "type2": 94.15,
+        "type3": 49.14,
+        "type4": 69.89,
+        "type5": 47.81,
     },
 }
 
@@ -58,36 +62,40 @@ def compare(data: Dict[str, Any]) -> str:
     rows.append(f"- Samples evaluated: {total}")
     rows.append(f"- Overall success: {success}/{total} ({_accuracy(success, total):.2f}%)")
     rows.append(f"- Paper full benchmark size: {PAPER_TARGETS['total_samples']}")
+    rows.append(f"- Paper overall accuracy: {PAPER_TARGETS['overall_accuracy']:.2f}%")
     rows.append("")
 
     if total != PAPER_TARGETS["total_samples"]:
         rows.append("Status: INCOMPLETE for full-paper reproduction because the sample count does not match 5020.")
         rows.append("")
 
-    rows.append("| Task | Success | Total | Accuracy | Paper GLM AutoVSR | Count Target |")
-    rows.append("|---|---:|---:|---:|---:|---:|")
+    rows.append("| Task | Success | Total | Accuracy | Count Target |")
+    rows.append("|---|---:|---:|---:|---:|")
     for task in ("transfer_function", "transient_response"):
         task_rows = [row for row in results if row.get("task") == task]
         task_total = len(task_rows)
         task_success = sum(1 for row in task_rows if row.get("success"))
-        target_key = f"{task}_accuracy"
         rows.append(
             f"| {task} | {task_success} | {task_total} | "
             f"{_accuracy(task_success, task_total):.2f}% | "
-            f"{PAPER_TARGETS['glm_4_6v_flash'][target_key]:.2f}% | "
             f"{PAPER_TARGETS['task_counts'][task]} |"
         )
 
     rows.append("")
-    rows.append("| Type | Success | Total | Accuracy | Count Target |")
-    rows.append("|---|---:|---:|---:|---:|")
+    rows.append("| Type | Success | Total | Accuracy | Paper Accuracy | Count Target |")
+    rows.append("|---|---:|---:|---:|---:|---:|")
     all_types = set(PAPER_TARGETS["type_counts"]) | {str(row.get("type", "unknown")) for row in results}
     for typ in sorted(all_types):
         type_rows = [row for row in results if str(row.get("type", "unknown")) == typ]
         type_total = len(type_rows)
         type_success = sum(1 for row in type_rows if row.get("success"))
         target = PAPER_TARGETS["type_counts"].get(typ, "-")
-        rows.append(f"| {typ} | {type_success} | {type_total} | {_accuracy(type_success, type_total):.2f}% | {target} |")
+        paper_accuracy = PAPER_TARGETS["type_accuracy"].get(typ)
+        paper_accuracy_text = f"{paper_accuracy:.2f}%" if paper_accuracy is not None else "-"
+        rows.append(
+            f"| {typ} | {type_success} | {type_total} | "
+            f"{_accuracy(type_success, type_total):.2f}% | {paper_accuracy_text} | {target} |"
+        )
 
     return "\n".join(rows)
 

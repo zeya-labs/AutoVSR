@@ -10,6 +10,8 @@ meant to generalize beyond CircuitSense-specific detectors:
 2. structured: ask the VLM for a structured component/short table, then compile.
 3. vote: run multiple structured generations and vote component endpoints.
 4. cascade: structured on all selected cases, then vote only structured residuals.
+5. tiled: transcribe overlapping image tiles, then merge tile observations with
+   the full image.
 
 Each method writes its own JSON and HTML report under the experiment directory.
 """
@@ -28,9 +30,11 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -93,6 +97,58 @@ Rules:
 """
 
 
+TILE_SYSTEM_PROMPT = """You are reading one cropped tile from a larger circuit schematic.
+
+Return ONLY one JSON object:
+{
+  "tile": "tile label from the prompt",
+  "visible_components": [
+    {"name": "R1", "type": "R", "nodes": ["1", "2"], "value": "R1", "visibility": "complete|partial"}
+  ],
+  "visible_shorts": [
+    {"nodes": ["1", "2"], "evidence": "explicit short between different labeled nodes", "visibility": "complete|partial"}
+  ],
+  "notes": ["brief uncertainty notes"]
+}
+
+Rules:
+- This is only a tile. Report what is visible; do not infer hidden off-tile endpoints.
+- If a component is cut off by the tile boundary, mark visibility as "partial".
+- Prefer exact component labels and exact integer node labels when visible.
+- Do not include ordinary wire segments as shorts.
+- Include a short only if the crop visibly shorts two different labeled nodes.
+- Do not invent components or node labels hidden outside the crop.
+"""
+
+
+TILE_MERGE_SYSTEM_PROMPT = """You are merging local tile observations into one complete circuit graph.
+
+You will receive the full schematic image and JSON observations from overlapping
+tiles. The tile observations are hints, not ground truth. Use the full image to
+resolve duplicates, partial components, boundary crossings, and node labels.
+
+Return ONLY one JSON object:
+{
+  "components": [
+    {"name": "R1", "type": "R", "nodes": ["1", "2"], "value": "R1"}
+  ],
+  "shorts": [
+    {"name": "W1", "nodes": ["1", "2"], "evidence": "explicit short between different labeled nodes"}
+  ]
+}
+
+Rules:
+- Produce one complete global circuit graph.
+- Preserve component names and values exactly as drawn.
+- Use integer node labels from the full image; node 0 is ground.
+- Merge duplicate observations of the same component from adjacent tiles.
+- Resolve partial tile observations using the full image.
+- Do not include ordinary wire segments as components.
+- Do not include self-loop shorts.
+- Add a short only when the full image explicitly shorts two different labeled nodes.
+"""
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -119,6 +175,13 @@ def _invoke_vlm(llm: Any, system_prompt: str, image_path: str, text: str) -> str
     return extract_text_content(response.content)
 
 
+def _invoke_vlm_multi_image(llm: Any, system_prompt: str, image_paths: list[str], text: str) -> str:
+    content = [_image_message(path) for path in image_paths]
+    content.append({"type": "text", "text": text})
+    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=content)])
+    return extract_text_content(response.content)
+
+
 def _json_from_text(text: str) -> dict[str, Any]:
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fenced:
@@ -142,6 +205,32 @@ def _netlist_from_text(text: str) -> str:
     if fenced:
         return fenced.group(1).strip()
     return text.strip()
+
+
+def _tile_image(image_path: str, out_dir: Path, grid: int = 2, overlap: float = 0.18) -> list[dict[str, Any]]:
+    image = Image.open(image_path)
+    width, height = image.size
+    tiles = []
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for row in range(grid):
+        for col in range(grid):
+            x0 = int(col * width / grid)
+            y0 = int(row * height / grid)
+            x1 = int((col + 1) * width / grid)
+            y1 = int((row + 1) * height / grid)
+            pad_x = int((x1 - x0) * overlap)
+            pad_y = int((y1 - y0) * overlap)
+            crop = (
+                max(0, x0 - pad_x),
+                max(0, y0 - pad_y),
+                min(width, x1 + pad_x),
+                min(height, y1 + pad_y),
+            )
+            label = f"r{row + 1}c{col + 1}"
+            tile_path = out_dir / f"{label}.png"
+            image.crop(crop).save(tile_path)
+            tiles.append({"label": label, "path": str(tile_path), "crop": crop, "size": [width, height]})
+    return tiles
 
 
 def _line_from_component(component: dict[str, Any], analysis_type: str) -> str | None:
@@ -316,6 +405,51 @@ Create the structured circuit graph JSON from the image."""
     data = _json_from_text(raw)
     netlist = _compile_structured(data, _analysis_type(row))
     return _make_candidate(row, netlist, "structured", raw, {"structured": data})
+
+
+def tiled_rewrite(llm: Any, row: dict[str, Any], grid: int = 2, overlap: float = 0.18) -> dict[str, Any]:
+    tile_payloads = []
+    raw_tile_responses = []
+    with TemporaryDirectory(prefix=f"{row['id']}_tiles_") as tmp:
+        tiles = _tile_image(row["image_path"], Path(tmp), grid=grid, overlap=overlap)
+        for tile in tiles:
+            text = f"""CASE: {row['id']}
+TILE: {tile['label']}
+CROP BOX IN FULL IMAGE: {tile['crop']}
+FULL IMAGE SIZE: {tile['size']}
+
+QUESTION:
+{row.get('question') or ''}
+
+Transcribe only what is visible in this crop."""
+            raw = _invoke_vlm(llm, TILE_SYSTEM_PROMPT, tile["path"], text)
+            raw_tile_responses.append({"tile": tile, "raw_response": raw})
+            try:
+                tile_payloads.append(_json_from_text(raw))
+            except Exception as exc:
+                tile_payloads.append({"tile": tile["label"], "parse_error": f"{type(exc).__name__}: {exc}"})
+
+        merge_text = f"""CASE: {row['id']}
+
+QUESTION:
+{row.get('question') or ''}
+
+TILE OBSERVATIONS:
+```json
+{json.dumps(tile_payloads, indent=2, ensure_ascii=False)}
+```
+
+Use the full image plus these tile observations to produce the complete global structured circuit graph."""
+        raw_merge = _invoke_vlm(llm, TILE_MERGE_SYSTEM_PROMPT, row["image_path"], merge_text)
+    data = _json_from_text(raw_merge)
+    netlist = _compile_structured(data, _analysis_type(row))
+    return _make_candidate(
+        row,
+        netlist,
+        "tiled",
+        raw_merge,
+        {"structured": data, "tile_payloads": tile_payloads, "raw_tile_responses": raw_tile_responses},
+    )
 
 
 def _vote_structured_payloads(payloads: list[dict[str, Any]], analysis_type: str) -> tuple[str, dict[str, Any]]:
@@ -549,6 +683,8 @@ def _run_one_method(method: str, row: dict[str, Any], vote_samples: int) -> dict
             return structured_rewrite(llm, row)
         if method == "vote":
             return voting_rewrite(llm, row, vote_samples)
+        if method == "tiled":
+            return tiled_rewrite(llm, row)
         raise ValueError(method)
     except Exception as exc:
         candidate = copy.deepcopy(row)
@@ -622,7 +758,7 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
         "--method",
-        choices=("wire_sanitize", "targeted", "structured", "vote", "cascade", "all", "oracle"),
+        choices=("wire_sanitize", "targeted", "structured", "vote", "tiled", "cascade", "all", "oracle"),
         default="all",
     )
     parser.add_argument("--only-wrong", action="store_true", default=True)
@@ -640,7 +776,7 @@ def main() -> int:
     rows = _selected_rows(baseline, args)
     run_oracle_diagnostics(baseline, rows, out_dir)
 
-    methods = ["wire_sanitize", "targeted", "structured", "vote", "cascade"] if args.method == "all" else [args.method]
+    methods = ["wire_sanitize", "targeted", "structured", "vote", "tiled", "cascade"] if args.method == "all" else [args.method]
     if args.method == "oracle":
         print(f"oracle diagnostics: {out_dir / 'oracle_diagnostics.json'}")
         return 0

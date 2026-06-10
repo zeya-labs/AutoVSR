@@ -1,7 +1,7 @@
 {
   "dataset_name": "AutoVSR_public_test_10",
   "version": "1.0",
-  "description": "Small public smoke-test set: 5 symbolic transfer-function cases covering type1-type5 and 5 transient-response cases covering the available transient types.",
+  "description": "Small public quick-test set: 5 symbolic transfer-function cases covering type1-type5 and 5 transient-response cases covering the available transient types.",
   "samples": [
     {
       "id": "synthetic_level0_q1155",

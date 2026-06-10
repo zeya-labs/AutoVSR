@@ -24,7 +24,7 @@ python scripts/run_eval.py
 
 ```bash
 python -m compileall scripts/run_eval.py main.py
-python scripts/run_eval.py --start 0 --end 20 --jobs 2 --tag smoke --stall-timeout 600
+python scripts/run_eval.py --start 0 --end 20 --jobs 2 --tag quick --stall-timeout 600
 ```
 
 全量 5020 条：

@@ -74,6 +74,40 @@ def _component_map(text: str) -> dict[str, tuple[str, tuple[str, ...], tuple[str
     return comps
 
 
+def _is_extra_step_self_source(line: str, expected_names: set[str]) -> bool:
+    parts = line.split()
+    if len(parts) != 5:
+        return False
+    name = parts[0]
+    if name in expected_names:
+        return False
+    prefix = re.match(r"[A-Za-z]+", name)
+    kind = prefix.group(0).upper() if prefix else name[0].upper()
+    return kind in {"I", "V"} and parts[3].lower() == "step" and parts[4] == name
+
+
+def _drop_extra_step_self_sources(predicted: str, expected: str) -> str:
+    expected_names = set(_component_map(expected))
+    kept = []
+    for line in _netlist_lines(predicted):
+        if _is_extra_step_self_source(line, expected_names):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _excluded_by_extra_step_self_source(row: dict[str, Any]) -> bool:
+    score = row.get("score") or {}
+    if score.get("component_multiset_match_with_undirected_nodes"):
+        return False
+    expected = row.get("expected_netlist") or ""
+    predicted = row.get("predicted_netlist") or ""
+    cleaned = _drop_extra_step_self_sources(predicted, expected)
+    if cleaned == "\n".join(_netlist_lines(predicted)):
+        return False
+    return bool(_score_netlist(cleaned, expected).get("component_multiset_match_with_undirected_nodes"))
+
+
 def _component_map_for_report(text: str) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], str]]:
     comps: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], str]] = {}
     for line in _netlist_lines(text):
@@ -541,6 +575,8 @@ def _render_html_report(
 ) -> str:
     summary = payload.get("summary") or {}
     total = int(summary.get("total") or 0)
+    raw_total = int(summary.get("raw_total") or total)
+    excluded = int(summary.get("excluded_extra_step_self_source") or 0)
     strict_ok = int(summary.get("component_multiset_match_with_undirected_nodes") or 0)
     ignore_ok = int(summary.get("component_multiset_match_ignore_nodes") or 0)
     strict_pct = (strict_ok / total * 100) if total else 0
@@ -666,6 +702,7 @@ def _render_html_report(
     <h1>Netlist Eval Report</h1>
     <div class="metrics">
       {metric_card("Total", str(total))}
+      {metric_card("Raw/Excluded", f"{raw_total}/{excluded}", "extra step self-source")}
       {metric_card("Strict match", f"{strict_ok}/{total}", f"{strict_pct:.1f}% with nodes")}
       {metric_card("Ignore-node match", f"{ignore_ok}/{total}", f"{ignore_pct:.1f}% components")}
       {metric_card("Wrong", str(len(wrong_rows)), f"{len(node_only)} node-only, {len(component_wrong)} component")}
@@ -857,21 +894,27 @@ def _avg(rows: list[dict[str, Any]], key: str) -> float:
 
 
 def _summary(results: list[dict[str, Any]]) -> dict[str, Any]:
-    total = len(results)
+    excluded_rows = [row for row in results if _excluded_by_extra_step_self_source(row)]
+    excluded_ids = {row["id"] for row in excluded_rows}
+    scored_results = [row for row in results if row["id"] not in excluded_ids]
+    total = len(scored_results)
     return {
         "total": total,
-        "build_success": sum(1 for row in results if row.get("success")),
+        "raw_total": len(results),
+        "excluded_extra_step_self_source": len(excluded_rows),
+        "excluded_extra_step_self_source_ids": sorted(excluded_ids, key=lambda item: _case_key(Path(item))),
+        "build_success": sum(1 for row in scored_results if row.get("success")),
         "component_multiset_match_ignore_nodes": sum(
-            1 for row in results if row["score"].get("component_multiset_match_ignore_nodes")
+            1 for row in scored_results if row["score"].get("component_multiset_match_ignore_nodes")
         ),
         "component_multiset_match_with_undirected_nodes": sum(
-            1 for row in results if row["score"].get("component_multiset_match_with_undirected_nodes")
+            1 for row in scored_results if row["score"].get("component_multiset_match_with_undirected_nodes")
         ),
-        "avg_component_name_recall": _avg(results, "component_name_recall"),
-        "avg_component_name_precision": _avg(results, "component_name_precision"),
-        "avg_type_accuracy_on_common": _avg(results, "component_type_accuracy_on_common"),
-        "avg_value_accuracy_on_common": _avg(results, "component_value_accuracy_on_common"),
-        "avg_undirected_terminal_accuracy_on_common": _avg(results, "undirected_terminal_accuracy_on_common"),
+        "avg_component_name_recall": _avg(scored_results, "component_name_recall"),
+        "avg_component_name_precision": _avg(scored_results, "component_name_precision"),
+        "avg_type_accuracy_on_common": _avg(scored_results, "component_type_accuracy_on_common"),
+        "avg_value_accuracy_on_common": _avg(scored_results, "component_value_accuracy_on_common"),
+        "avg_undirected_terminal_accuracy_on_common": _avg(scored_results, "undirected_terminal_accuracy_on_common"),
     }
 
 

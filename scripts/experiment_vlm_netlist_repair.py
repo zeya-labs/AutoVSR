@@ -45,6 +45,7 @@ from scripts.eval_vlm_netlist import (  # noqa: E402
     _component_map_for_report,
     _is_wrong,
     _score_netlist,
+    _summary,
     _write_eval_report,
 )
 from src.utils.response_parser import extract_text_content  # noqa: E402
@@ -552,7 +553,7 @@ def _merge_candidate_results(baseline: dict[str, Any], candidate_rows: list[dict
     rows = sorted(rows_by_id.values(), key=lambda item: _case_key(Path(item["id"])))
     payload = copy.deepcopy(baseline)
     payload["results"] = rows
-    payload["summary"] = _summary_from_scores(rows)
+    payload["summary"] = _summary(rows)
     payload["output_path"] = str(output_path)
     payload["experiment"] = {
         "baseline_path": baseline.get("output_path"),
@@ -563,27 +564,6 @@ def _merge_candidate_results(baseline: dict[str, Any], candidate_rows: list[dict
 
 def _strict_match(row: dict[str, Any]) -> bool:
     return bool(row.get("success") and (row.get("score") or {}).get("component_multiset_match_with_undirected_nodes"))
-
-
-def _summary_from_scores(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    def avg(key: str) -> float:
-        return sum(float((row.get("score") or {}).get(key) or 0.0) for row in rows) / len(rows) if rows else 0.0
-
-    return {
-        "total": len(rows),
-        "build_success": sum(1 for row in rows if row.get("success")),
-        "component_multiset_match_ignore_nodes": sum(
-            1 for row in rows if (row.get("score") or {}).get("component_multiset_match_ignore_nodes")
-        ),
-        "component_multiset_match_with_undirected_nodes": sum(
-            1 for row in rows if (row.get("score") or {}).get("component_multiset_match_with_undirected_nodes")
-        ),
-        "avg_component_name_recall": avg("component_name_recall"),
-        "avg_component_name_precision": avg("component_name_precision"),
-        "avg_type_accuracy_on_common": avg("component_type_accuracy_on_common"),
-        "avg_value_accuracy_on_common": avg("component_value_accuracy_on_common"),
-        "avg_undirected_terminal_accuracy_on_common": avg("undirected_terminal_accuracy_on_common"),
-    }
 
 
 def _selected_case_paths(baseline: dict[str, Any]) -> list[Path]:

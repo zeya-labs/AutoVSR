@@ -423,7 +423,14 @@ QUESTION:
 
 Transcribe only what is visible in this crop."""
             raw = _invoke_vlm(llm, TILE_SYSTEM_PROMPT, tile["path"], text)
-            raw_tile_responses.append({"tile": tile, "raw_response": raw})
+            raw_tile_responses.append(
+                {
+                    "tile": tile,
+                    "system_prompt": TILE_SYSTEM_PROMPT,
+                    "human_text": text,
+                    "raw_response": raw,
+                }
+            )
             try:
                 tile_payloads.append(_json_from_text(raw))
             except Exception as exc:
@@ -448,7 +455,13 @@ Use the full image plus these tile observations to produce the complete global s
         netlist,
         "tiled",
         raw_merge,
-        {"structured": data, "tile_payloads": tile_payloads, "raw_tile_responses": raw_tile_responses},
+        {
+            "structured": data,
+            "tile_payloads": tile_payloads,
+            "raw_tile_responses": raw_tile_responses,
+            "merge_system_prompt": TILE_MERGE_SYSTEM_PROMPT,
+            "merge_human_text": merge_text,
+        },
     )
 
 

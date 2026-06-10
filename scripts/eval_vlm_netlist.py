@@ -312,8 +312,49 @@ def _unified_diff(expected: str, predicted: str) -> str:
     )
 
 
-def _write_case_report(row: dict[str, Any], case_dir: Path, out_dir: Path) -> dict[str, str]:
-    case_out = out_dir / "wrong_cases" / row["id"]
+def _safe_filename(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_") or "item"
+
+
+def _write_tiled_trace_assets(row: dict[str, Any], case_out: Path, image_src: Path) -> dict[str, str]:
+    repair = row.get("repair") or {}
+    if repair.get("method") != "tiled":
+        return {}
+
+    try:
+        from PIL import Image
+    except Exception:
+        return {}
+
+    if not image_src.exists():
+        return {}
+
+    tile_images: dict[str, str] = {}
+    tiles_out = case_out / "tiles"
+    tiles_out.mkdir(parents=True, exist_ok=True)
+    try:
+        with Image.open(image_src) as image:
+            for idx, item in enumerate(repair.get("raw_tile_responses") or [], start=1):
+                tile = item.get("tile") or {}
+                label = str(tile.get("label") or f"tile_{idx}")
+                crop = tile.get("crop") or []
+                if not isinstance(crop, (list, tuple)) or len(crop) != 4:
+                    continue
+                left, top, right, bottom = [int(round(float(value))) for value in crop]
+                left = max(0, min(left, image.width))
+                top = max(0, min(top, image.height))
+                right = max(left + 1, min(right, image.width))
+                bottom = max(top + 1, min(bottom, image.height))
+                tile_path = tiles_out / f"{idx:02d}_{_safe_filename(label)}.png"
+                image.crop((left, top, right, bottom)).save(tile_path)
+                tile_images[label] = str(tile_path)
+    except Exception:
+        return tile_images
+    return tile_images
+
+
+def _write_case_report(row: dict[str, Any], case_dir: Path, out_dir: Path) -> dict[str, Any]:
+    case_out = out_dir / "cases" / row["id"]
     case_out.mkdir(parents=True, exist_ok=True)
     expected = row.get("expected_netlist") or ""
     predicted = row.get("predicted_netlist") or ""
@@ -328,6 +369,8 @@ def _write_case_report(row: dict[str, Any], case_dir: Path, out_dir: Path) -> di
             shutil.copy2(image_src, image_dst)
     else:
         image_dst = image_src
+
+    tile_images = _write_tiled_trace_assets(row, case_out, image_src)
 
     rows = _component_diff_rows(expected, predicted)
     md_lines = [
@@ -379,6 +422,7 @@ def _write_case_report(row: dict[str, Any], case_dir: Path, out_dir: Path) -> di
         "case_dir": case_out.name,
         "readme": str(case_out / "README.md"),
         "image": str(image_dst),
+        "tile_images": tile_images,
     }
 
 
@@ -390,6 +434,11 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
     selected_by_id = {p.name: p for p in selected}
     rows = sorted(payload.get("results") or [], key=lambda item: _case_key(Path(item["id"])))
     wrong_rows = [row for row in rows if _is_wrong(row)]
+    updated_ids = set(payload.get("experiment", {}).get("updated_cases") or [])
+    display_ids = {row["id"] for row in wrong_rows}
+    display_ids.update(updated_ids)
+    display_ids.update(row["id"] for row in rows if (row.get("repair") or {}).get("method") == "tiled")
+    display_rows = [row for row in rows if row["id"] in display_ids]
     node_only = [
         row
         for row in wrong_rows
@@ -397,38 +446,103 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
     ]
     component_wrong = [row for row in wrong_rows if row not in node_only]
 
-    case_links: dict[str, dict[str, str]] = {}
-    wrong_dir = out_dir / "wrong_cases"
-    if wrong_dir.exists():
-        shutil.rmtree(wrong_dir)
-    wrong_dir.mkdir(parents=True, exist_ok=True)
-    for row in wrong_rows:
+    case_links: dict[str, dict[str, Any]] = {}
+    for report_subdir in ("cases", "wrong_cases"):
+        report_dir = out_dir / report_subdir
+        if report_dir.exists():
+            shutil.rmtree(report_dir)
+    (out_dir / "cases").mkdir(parents=True, exist_ok=True)
+    for row in display_rows:
         case_dir = selected_by_id.get(row["id"], Path(row.get("image_path", "")).parent)
         case_links[row["id"]] = _write_case_report(row, case_dir, out_dir)
 
     manifest = {
         "json": str(output_path),
         "report_dir": str(out_dir),
+        "display_count": len(display_rows),
         "wrong_count": len(wrong_rows),
         "node_only_count": len(node_only),
         "component_wrong_count": len(component_wrong),
+        "updated_count": len(updated_ids),
+        "display_ids": [row["id"] for row in display_rows],
         "wrong_ids": [row["id"] for row in wrong_rows],
         "node_only_ids": [row["id"] for row in node_only],
         "component_wrong_ids": [row["id"] for row in component_wrong],
+        "updated_ids": sorted(updated_ids, key=lambda item: _case_key(Path(item))),
     }
     (out_dir / "wrong_cases.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     (out_dir / "wrong_ids.txt").write_text("\n".join(manifest["wrong_ids"]) + ("\n" if wrong_rows else ""), encoding="utf-8")
 
-    html_text = _render_html_report(payload, wrong_rows, node_only, component_wrong, case_links, out_dir)
+    html_text = _render_html_report(payload, display_rows, wrong_rows, node_only, component_wrong, case_links, out_dir)
     (out_dir / "index.html").write_text(html_text, encoding="utf-8")
+
+
+def _render_tiled_trace(
+    repair: dict[str, Any],
+    tile_images: dict[str, str],
+    full_image_rel: str,
+    out_dir: Path,
+) -> str:
+    if repair.get("method") != "tiled":
+        return ""
+    tile_items = []
+    for item in repair.get("raw_tile_responses") or []:
+        tile = item.get("tile") or {}
+        label = str(tile.get("label") or "tile")
+        image_src = tile_images.get(label) or tile_images.get(str(tile.get("label") or ""))
+        image_rel = _relative_link(image_src, out_dir) if image_src else ""
+        image_html = f'<img src="{html.escape(image_rel)}" alt="{html.escape(label)} tile">' if image_rel else (
+            f"<p class=\"muted\">tile image unavailable; crop={html.escape(str(tile.get('crop') or ''))}</p>"
+        )
+        tile_items.append(
+            f"""
+            <section class="trace-tile">
+              <h4>{html.escape(label)} crop {html.escape(str(tile.get('crop') or ''))}</h4>
+              <div class="trace-grid">
+                <div class="image-wrap">{image_html}</div>
+                <div>
+                  <h5>Tile system prompt</h5>
+                  <pre>{html.escape(str(item.get('system_prompt') or ''))}</pre>
+                  <h5>Tile human prompt</h5>
+                  <pre>{html.escape(str(item.get('human_text') or ''))}</pre>
+                  <h5>Tile response</h5>
+                  <pre>{html.escape(str(item.get('raw_response') or ''))}</pre>
+                </div>
+              </div>
+            </section>
+            """
+        )
+    merge_prompt = str(repair.get("merge_human_text") or "")
+    merge_system = str(repair.get("merge_system_prompt") or "")
+    merge_response = str(repair.get("raw_response") or "")
+    structured = json.dumps(repair.get("structured") or {}, indent=2, ensure_ascii=False)
+    return f"""
+    <details class="trace">
+      <summary>Tiled VLM trace: tile prompts, tile images, tile responses, merge prompt, merge response</summary>
+      {''.join(tile_items) or '<p class="muted">No tile trace saved for this row.</p>'}
+      <section class="trace-merge">
+        <h4>Merge full image</h4>
+        <div class="image-wrap merge-image"><img src="{html.escape(full_image_rel)}" alt="full image for merge"></div>
+        <h4>Merge system prompt</h4>
+        <pre>{html.escape(merge_system)}</pre>
+        <h4>Merge human prompt</h4>
+        <pre>{html.escape(merge_prompt)}</pre>
+        <h4>Merge response</h4>
+        <pre>{html.escape(merge_response)}</pre>
+        <h4>Parsed structured graph</h4>
+        <pre>{html.escape(structured)}</pre>
+      </section>
+    </details>
+    """
 
 
 def _render_html_report(
     payload: dict[str, Any],
+    display_rows: list[dict[str, Any]],
     wrong_rows: list[dict[str, Any]],
     node_only: list[dict[str, Any]],
     component_wrong: list[dict[str, Any]],
-    case_links: dict[str, dict[str, str]],
+    case_links: dict[str, dict[str, Any]],
     out_dir: Path,
 ) -> str:
     summary = payload.get("summary") or {}
@@ -437,6 +551,7 @@ def _render_html_report(
     ignore_ok = int(summary.get("component_multiset_match_ignore_nodes") or 0)
     strict_pct = (strict_ok / total * 100) if total else 0
     ignore_pct = (ignore_ok / total * 100) if total else 0
+    updated_count = len(payload.get("experiment", {}).get("updated_cases") or [])
 
     def metric_card(label: str, value: str, detail: str = "") -> str:
         return (
@@ -452,6 +567,8 @@ def _render_html_report(
         links = case_links.get(row["id"], {})
         image_rel = _relative_link(links.get("image") or row.get("image_path") or "", out_dir)
         readme_rel = _relative_link(links.get("readme") or "", out_dir)
+        repair = row.get("repair") or {}
+        tiled_trace = _render_tiled_trace(repair, links.get("tile_images") or {}, image_rel, out_dir)
         diffs = _component_diff_rows(row.get("expected_netlist") or "", row.get("predicted_netlist") or "")
         diff_rows = "\n".join(
             "<tr>"
@@ -493,11 +610,12 @@ def _render_html_report(
             <div><h3>Pred</h3><pre>{html.escape(row.get('predicted_netlist') or '')}</pre></div>
           </div>
           <details><summary>Unified diff</summary><pre>{html.escape(raw_diff)}</pre></details>
+          {tiled_trace}
         </section>
         """
 
-    case_nav = " ".join(f'<a href="#{html.escape(row["id"])}">{html.escape(row["id"])}</a>' for row in wrong_rows)
-    case_html = "\n".join(case_section(row) for row in wrong_rows)
+    case_nav = " ".join(f'<a href="#{html.escape(row["id"])}">{html.escape(row["id"])}</a>' for row in display_rows)
+    case_html = "\n".join(case_section(row) for row in display_rows)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -540,7 +658,14 @@ def _render_html_report(
     .tag.nodes, .tag.polarity {{ background:#fef0c7; color:var(--warn); }}
     details {{ margin-top:12px; }}
     summary {{ cursor:pointer; color:var(--blue); }}
+    .trace {{ border-top:1px solid var(--line); padding-top:10px; }}
+    .trace h4 {{ margin:16px 0 8px; font-size:15px; }}
+    .trace h5 {{ margin:10px 0 6px; font-size:12px; color:var(--muted); }}
+    .trace-grid {{ display:grid; grid-template-columns:minmax(220px,360px) 1fr; gap:12px; align-items:start; }}
+    .trace .image-wrap img {{ max-height:360px; }}
+    .muted {{ color:var(--muted); }}
     @media (max-width: 860px) {{ header {{ position:static; }} main, header {{ padding-left:14px; padding-right:14px; }} .case-grid, .netlists {{ grid-template-columns:1fr; }} }}
+    @media (max-width: 860px) {{ .trace-grid {{ grid-template-columns:1fr; }} }}
   </style>
 </head>
 <body>
@@ -551,6 +676,7 @@ def _render_html_report(
       {metric_card("Strict match", f"{strict_ok}/{total}", f"{strict_pct:.1f}% with nodes")}
       {metric_card("Ignore-node match", f"{ignore_ok}/{total}", f"{ignore_pct:.1f}% components")}
       {metric_card("Wrong", str(len(wrong_rows)), f"{len(node_only)} node-only, {len(component_wrong)} component")}
+      {metric_card("Shown", str(len(display_rows)), f"{updated_count} updated cases")}
     </div>
     <nav>{case_nav}</nav>
   </header>

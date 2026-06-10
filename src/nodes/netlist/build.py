@@ -255,6 +255,7 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
         content = f"```netlist\n{netlist}\n```"  # For subsequent I/O extraction
         token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         build_llm_calls = 0
+        prompt_info = None
     else:
         # Terminal output - Build title
         print_build_header(is_retry=False)
@@ -275,6 +276,7 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
         system_prompt = base_prompt
         
         messages = [SystemMessage(content=system_prompt)]
+        prompt_info = None
         
         if image_path and Path(image_path).exists():
             with open(image_path, "rb") as f:
@@ -302,11 +304,26 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
                     context_parts.append("⚠️ For reactance values (XL, XC), use: `Lname Np Nm {XL/omega}` or `Cname Np Nm {1/(XC*omega)}`")
             if constraints:
                 context_parts.append(f"Component values from problem: {constraints}")
+            human_text = "\n".join(context_parts)
             
             messages.append(HumanMessage(content=[
                 {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_data}"}},
-                {"type": "text", "text": "\n".join(context_parts)}
+                {"type": "text", "text": human_text}
             ]))
+        else:
+            media_type = None
+            human_text = ""
+        
+        if state.get("return_build_prompt"):
+            prompt_info = {
+                "system_prompt": system_prompt,
+                "human_text": human_text,
+                "image_path": image_path if image_path and Path(image_path).exists() else None,
+                "image_media_type": media_type,
+                "image_attached_as": "base64 image_url" if media_type else None,
+                "detected_components": detected_components,
+                "used_full_modular_prompt": not bool(detected_components),
+            }
         
         # Call LLM
         response = llm.invoke(messages)
@@ -460,6 +477,8 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
         "ir_code": netlist,
         "ir": ir_dict,
     }
+    if prompt_info:
+        result["build_prompt"] = prompt_info
     
     # Add Input/Output information (backward compatibility)
     if extracted_input:

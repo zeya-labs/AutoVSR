@@ -334,6 +334,55 @@ def _component_diff_rows(expected: str, predicted: str) -> list[dict[str, str]]:
     return rows
 
 
+ERROR_TAG_LABELS = {
+    "excluded-step": "excluded step",
+    "extra": "extra",
+    "missing": "missing",
+    "nodes": "nodes",
+    "polarity": "polarity",
+    "value": "value",
+    "type": "type",
+    "build": "build",
+    "other": "other",
+}
+
+
+ERROR_TAG_ORDER = {
+    "excluded-step": 0,
+    "missing": 1,
+    "extra": 2,
+    "nodes": 3,
+    "polarity": 4,
+    "value": 5,
+    "type": 6,
+    "build": 7,
+    "other": 8,
+}
+
+
+def _case_error_tags(row: dict[str, Any]) -> list[str]:
+    tags = set()
+    if _excluded_by_extra_step_self_source(row):
+        tags.add("excluded-step")
+    if not row.get("success"):
+        tags.add("build")
+    for diff in _component_diff_rows(row.get("expected_netlist") or "", row.get("predicted_netlist") or ""):
+        for status in str(diff.get("status") or "").split("+"):
+            if status:
+                tags.add(status)
+    if not tags:
+        tags.add("other")
+    return sorted(tags, key=lambda item: (ERROR_TAG_ORDER.get(item, 99), item))
+
+
+def _render_error_chips(tags: list[str], *, compact: bool = False) -> str:
+    chip_class = "error-chip compact" if compact else "error-chip"
+    return "".join(
+        f'<span class="{chip_class} {html.escape(tag)}">{html.escape(ERROR_TAG_LABELS.get(tag, tag))}</span>'
+        for tag in tags
+    )
+
+
 def _unified_diff(expected: str, predicted: str) -> str:
     return "\n".join(
         difflib.unified_diff(
@@ -497,6 +546,7 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
         "wrong_ids": [row["id"] for row in wrong_rows],
         "node_only_ids": [row["id"] for row in node_only],
         "component_wrong_ids": [row["id"] for row in component_wrong],
+        "error_tags_by_id": {row["id"]: _case_error_tags(row) for row in display_rows},
     }
     (out_dir / "wrong_cases.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     (out_dir / "wrong_ids.txt").write_text("\n".join(manifest["wrong_ids"]) + ("\n" if wrong_rows else ""), encoding="utf-8")
@@ -594,6 +644,8 @@ def _render_html_report(
     def case_section(row: dict[str, Any]) -> str:
         score = row.get("score") or {}
         links = case_links.get(row["id"], {})
+        error_tags = _case_error_tags(row)
+        error_chips = _render_error_chips(error_tags)
         image_rel = _relative_link(links.get("image") or row.get("image_path") or "", out_dir)
         readme_rel = _relative_link(links.get("readme") or "", out_dir)
         repair = row.get("repair") or {}
@@ -616,6 +668,7 @@ def _render_html_report(
           <div class="case-head">
             <div>
               <h2>{html.escape(row['id'])}</h2>
+              <div class="case-tags">{error_chips}</div>
               <p>{html.escape(row.get('question') or '')}</p>
             </div>
             <a href="{html.escape(readme_rel)}">files</a>
@@ -643,7 +696,11 @@ def _render_html_report(
         </section>
         """
 
-    case_nav = " ".join(f'<a href="#{html.escape(row["id"])}">{html.escape(row["id"])}</a>' for row in display_rows)
+    case_nav = " ".join(
+        f'<a class="nav-case {html.escape(_case_error_tags(row)[0])}" href="#{html.escape(row["id"])}">'
+        f'<span>{html.escape(row["id"])}</span>{_render_error_chips(_case_error_tags(row), compact=True)}</a>'
+        for row in display_rows
+    )
     case_html = "\n".join(case_section(row) for row in display_rows)
     return f"""<!doctype html>
 <html lang="en">
@@ -664,12 +721,23 @@ def _render_html_report(
     .metric div {{ color:var(--muted); font-size:12px; }}
     .metric strong {{ display:block; font-size:22px; margin:2px 0; }}
     .metric span {{ color:var(--muted); font-size:12px; }}
-    nav {{ display:flex; gap:6px; flex-wrap:wrap; max-height:74px; overflow:auto; }}
+    nav {{ display:flex; gap:6px; flex-wrap:wrap; max-height:98px; overflow:auto; }}
     nav a, .case-head a {{ color:var(--blue); text-decoration:none; border:1px solid var(--line); background:#fff; border-radius:6px; padding:3px 7px; }}
+    nav a.nav-case {{ display:flex; align-items:center; gap:5px; color:var(--ink); border-left-width:5px; }}
+    .nav-case.excluded-step {{ border-left-color:#7c3aed; }}
+    .nav-case.missing {{ border-left-color:#b42318; }}
+    .nav-case.extra {{ border-left-color:#c2410c; }}
+    .nav-case.nodes {{ border-left-color:#9a6700; }}
+    .nav-case.polarity {{ border-left-color:#a16207; }}
+    .nav-case.value {{ border-left-color:#0369a1; }}
+    .nav-case.type {{ border-left-color:#be185d; }}
+    .nav-case.build {{ border-left-color:#374151; }}
+    .nav-case.other {{ border-left-color:#4f46e5; }}
     main {{ padding:18px 28px 36px; }}
     .case {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; margin:0 0 18px; padding:16px; }}
     .case-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:12px; }}
     .case-head p {{ margin:6px 0 0; color:var(--muted); }}
+    .case-tags {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:7px; }}
     .case-grid {{ display:grid; grid-template-columns:minmax(260px,420px) 1fr; gap:14px; align-items:start; margin-bottom:14px; }}
     .image-wrap {{ border:1px solid var(--line); border-radius:8px; background:#fff; padding:8px; }}
     img {{ display:block; width:100%; height:auto; max-height:300px; object-fit:contain; }}
@@ -685,6 +753,17 @@ def _render_html_report(
     .tag {{ display:inline-block; border-radius:999px; padding:2px 7px; background:#eef2ff; color:#3730a3; font-size:12px; }}
     .tag.missing, .tag.extra, .tag.type {{ background:#fee4e2; color:var(--bad); }}
     .tag.nodes, .tag.polarity {{ background:#fef0c7; color:var(--warn); }}
+    .error-chip {{ display:inline-flex; align-items:center; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:650; line-height:1.2; border:1px solid transparent; }}
+    .error-chip.compact {{ padding:1px 5px; font-size:10px; max-width:78px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .error-chip.excluded-step {{ background:#f3e8ff; color:#6d28d9; border-color:#d8b4fe; }}
+    .error-chip.missing {{ background:#fee2e2; color:#991b1b; border-color:#fecaca; }}
+    .error-chip.extra {{ background:#ffedd5; color:#9a3412; border-color:#fed7aa; }}
+    .error-chip.nodes {{ background:#fef3c7; color:#92400e; border-color:#fde68a; }}
+    .error-chip.polarity {{ background:#fef9c3; color:#854d0e; border-color:#fde047; }}
+    .error-chip.value {{ background:#e0f2fe; color:#075985; border-color:#bae6fd; }}
+    .error-chip.type {{ background:#fce7f3; color:#9d174d; border-color:#fbcfe8; }}
+    .error-chip.build {{ background:#f3f4f6; color:#374151; border-color:#d1d5db; }}
+    .error-chip.other {{ background:#e0e7ff; color:#3730a3; border-color:#c7d2fe; }}
     details {{ margin-top:12px; }}
     summary {{ cursor:pointer; color:var(--blue); }}
     .trace {{ border-top:1px solid var(--line); padding-top:10px; }}

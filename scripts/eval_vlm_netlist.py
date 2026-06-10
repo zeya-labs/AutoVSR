@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import difflib
+import html
 import io
 import json
 import re
+import shutil
 import sys
 import subprocess
 import time
@@ -71,12 +74,32 @@ def _component_map(text: str) -> dict[str, tuple[str, tuple[str, ...], tuple[str
     return comps
 
 
+def _component_map_for_report(text: str) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], str]]:
+    comps: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], str]] = {}
+    for line in _netlist_lines(text):
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        name = parts[0]
+        prefix = re.match(r"[A-Za-z]+", name)
+        kind = prefix.group(0).upper() if prefix else name[0].upper()
+        nodes = tuple(parts[1:3])
+        args = tuple(parts[3:])
+        comps[name] = (kind, nodes, args, line)
+    return comps
+
+
 def _component_signature(text: str, *, ignore_nodes: bool = False) -> Counter:
     sig = Counter()
     for name, (kind, nodes, args) in _component_map(text).items():
         key = (name, kind, args) if ignore_nodes else (name, kind, tuple(sorted(nodes)), args)
         sig[key] += 1
     return sig
+
+
+def _is_wrong(row: dict[str, Any]) -> bool:
+    score = row.get("score") or {}
+    return not row.get("success") or not score.get("component_multiset_match_with_undirected_nodes")
 
 
 def _score_netlist(predicted: str, expected: str) -> dict[str, Any]:
@@ -227,6 +250,322 @@ def _run_case_subprocess(case_dir: Path, timeout: int, return_build_prompt: bool
     }
 
 
+def _report_dir(output_path: Path) -> Path:
+    return output_path.with_suffix("")
+
+
+def _relative_link(target: str | Path, base_dir: Path) -> str:
+    try:
+        return Path(target).resolve().relative_to(base_dir.resolve()).as_posix()
+    except Exception:
+        try:
+            return Path(target).resolve().as_uri()
+        except Exception:
+            return str(target)
+
+
+def _component_diff_rows(expected: str, predicted: str) -> list[dict[str, str]]:
+    exp = _component_map_for_report(expected)
+    pred = _component_map_for_report(predicted)
+    rows: list[dict[str, str]] = []
+    for name in sorted(set(exp) | set(pred), key=lambda item: (_case_key(Path(item)), item)):
+        if name not in pred:
+            rows.append({"name": name, "status": "missing", "expected": exp[name][3], "predicted": ""})
+            continue
+        if name not in exp:
+            rows.append({"name": name, "status": "extra", "expected": "", "predicted": pred[name][3]})
+            continue
+        exp_kind, exp_nodes, exp_args, exp_line = exp[name]
+        pred_kind, pred_nodes, pred_args, pred_line = pred[name]
+        problems = []
+        if exp_kind != pred_kind:
+            problems.append("type")
+        if tuple(sorted(exp_nodes)) != tuple(sorted(pred_nodes)):
+            problems.append("nodes")
+        elif exp_nodes != pred_nodes:
+            problems.append("polarity")
+        if exp_args != pred_args:
+            problems.append("value")
+        if problems:
+            rows.append(
+                {
+                    "name": name,
+                    "status": "+".join(problems),
+                    "expected": exp_line,
+                    "predicted": pred_line,
+                }
+            )
+    return rows
+
+
+def _unified_diff(expected: str, predicted: str) -> str:
+    return "\n".join(
+        difflib.unified_diff(
+            _netlist_lines(expected),
+            _netlist_lines(predicted),
+            fromfile="gt",
+            tofile="pred",
+            lineterm="",
+        )
+    )
+
+
+def _write_case_report(row: dict[str, Any], case_dir: Path, out_dir: Path) -> dict[str, str]:
+    case_out = out_dir / "wrong_cases" / row["id"]
+    case_out.mkdir(parents=True, exist_ok=True)
+    expected = row.get("expected_netlist") or ""
+    predicted = row.get("predicted_netlist") or ""
+    (case_out / "gt.netlist").write_text(expected + "\n", encoding="utf-8")
+    (case_out / "pred.netlist").write_text(predicted + "\n", encoding="utf-8")
+    (case_out / "diff.patch").write_text(_unified_diff(expected, predicted) + "\n", encoding="utf-8")
+
+    image_src = Path(row.get("image_path") or case_dir / f"{row['id']}_image.png")
+    if image_src.exists():
+        image_dst = case_out / image_src.name
+        if not image_dst.exists() or image_dst.stat().st_mtime < image_src.stat().st_mtime:
+            shutil.copy2(image_src, image_dst)
+    else:
+        image_dst = image_src
+
+    rows = _component_diff_rows(expected, predicted)
+    md_lines = [
+        f"# {row['id']}",
+        "",
+        f"- success: `{row.get('success')}`",
+        f"- error: `{row.get('error')}`",
+        f"- image: `{image_src}`",
+        f"- question: {row.get('question') or ''}",
+        "",
+        "## Component Differences",
+        "",
+        "| component | status | gt | pred |",
+        "| --- | --- | --- | --- |",
+    ]
+    for diff_row in rows:
+        md_lines.append(
+            "| {name} | {status} | `{expected}` | `{predicted}` |".format(
+                name=diff_row["name"],
+                status=diff_row["status"],
+                expected=diff_row["expected"].replace("|", "\\|"),
+                predicted=diff_row["predicted"].replace("|", "\\|"),
+            )
+        )
+    md_lines.extend(
+        [
+            "",
+            "## GT",
+            "",
+            "```netlist",
+            expected,
+            "```",
+            "",
+            "## Pred",
+            "",
+            "```netlist",
+            predicted,
+            "```",
+            "",
+            "## Unified Diff",
+            "",
+            "```diff",
+            _unified_diff(expected, predicted),
+            "```",
+        ]
+    )
+    (case_out / "README.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    return {
+        "case_dir": case_out.name,
+        "readme": str(case_out / "README.md"),
+        "image": str(image_dst),
+    }
+
+
+def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
+    output_path = Path(payload["output_path"])
+    out_dir = _report_dir(output_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_by_id = {p.name: p for p in selected}
+    rows = sorted(payload.get("results") or [], key=lambda item: _case_key(Path(item["id"])))
+    wrong_rows = [row for row in rows if _is_wrong(row)]
+    node_only = [
+        row
+        for row in wrong_rows
+        if row.get("success") and (row.get("score") or {}).get("component_multiset_match_ignore_nodes")
+    ]
+    component_wrong = [row for row in wrong_rows if row not in node_only]
+
+    case_links: dict[str, dict[str, str]] = {}
+    wrong_dir = out_dir / "wrong_cases"
+    wrong_dir.mkdir(parents=True, exist_ok=True)
+    for row in wrong_rows:
+        case_dir = selected_by_id.get(row["id"], Path(row.get("image_path", "")).parent)
+        case_links[row["id"]] = _write_case_report(row, case_dir, out_dir)
+
+    manifest = {
+        "json": str(output_path),
+        "report_dir": str(out_dir),
+        "wrong_count": len(wrong_rows),
+        "node_only_count": len(node_only),
+        "component_wrong_count": len(component_wrong),
+        "wrong_ids": [row["id"] for row in wrong_rows],
+        "node_only_ids": [row["id"] for row in node_only],
+        "component_wrong_ids": [row["id"] for row in component_wrong],
+    }
+    (out_dir / "wrong_cases.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "wrong_ids.txt").write_text("\n".join(manifest["wrong_ids"]) + ("\n" if wrong_rows else ""), encoding="utf-8")
+
+    html_text = _render_html_report(payload, wrong_rows, node_only, component_wrong, case_links, out_dir)
+    (out_dir / "index.html").write_text(html_text, encoding="utf-8")
+
+
+def _render_html_report(
+    payload: dict[str, Any],
+    wrong_rows: list[dict[str, Any]],
+    node_only: list[dict[str, Any]],
+    component_wrong: list[dict[str, Any]],
+    case_links: dict[str, dict[str, str]],
+    out_dir: Path,
+) -> str:
+    summary = payload.get("summary") or {}
+    total = int(summary.get("total") or 0)
+    strict_ok = int(summary.get("component_multiset_match_with_undirected_nodes") or 0)
+    ignore_ok = int(summary.get("component_multiset_match_ignore_nodes") or 0)
+    strict_pct = (strict_ok / total * 100) if total else 0
+    ignore_pct = (ignore_ok / total * 100) if total else 0
+
+    def metric_card(label: str, value: str, detail: str = "") -> str:
+        return (
+            '<div class="metric">'
+            f"<div>{html.escape(label)}</div>"
+            f"<strong>{html.escape(value)}</strong>"
+            f"<span>{html.escape(detail)}</span>"
+            "</div>"
+        )
+
+    def case_section(row: dict[str, Any]) -> str:
+        score = row.get("score") or {}
+        links = case_links.get(row["id"], {})
+        image_rel = _relative_link(links.get("image") or row.get("image_path") or "", out_dir)
+        readme_rel = _relative_link(links.get("readme") or "", out_dir)
+        diffs = _component_diff_rows(row.get("expected_netlist") or "", row.get("predicted_netlist") or "")
+        diff_rows = "\n".join(
+            "<tr>"
+            f"<td>{html.escape(item['name'])}</td>"
+            f"<td><span class=\"tag {html.escape(item['status'].split('+')[0])}\">{html.escape(item['status'])}</span></td>"
+            f"<td><code>{html.escape(item['expected'])}</code></td>"
+            f"<td><code>{html.escape(item['predicted'])}</code></td>"
+            "</tr>"
+            for item in diffs
+        )
+        if not diff_rows:
+            diff_rows = '<tr><td colspan="4">No component-level differences detected by name.</td></tr>'
+        raw_diff = _unified_diff(row.get("expected_netlist") or "", row.get("predicted_netlist") or "")
+        return f"""
+        <section class="case" id="{html.escape(row['id'])}">
+          <div class="case-head">
+            <div>
+              <h2>{html.escape(row['id'])}</h2>
+              <p>{html.escape(row.get('question') or '')}</p>
+            </div>
+            <a href="{html.escape(readme_rel)}">files</a>
+          </div>
+          <div class="case-grid">
+            <div class="image-wrap"><img src="{html.escape(image_rel)}" alt="{html.escape(row['id'])} schematic"></div>
+            <div class="score-panel">
+              <div><b>success</b><span>{html.escape(str(row.get('success')))}</span></div>
+              <div><b>error</b><span>{html.escape(str(row.get('error')))}</span></div>
+              <div><b>components</b><span>{score.get('expected_components')} GT / {score.get('predicted_components')} pred</span></div>
+              <div><b>node acc</b><span>{float(score.get('undirected_terminal_accuracy_on_common') or 0):.3f}</span></div>
+              <div><b>ignore nodes</b><span>{html.escape(str(score.get('component_multiset_match_ignore_nodes')))}</span></div>
+            </div>
+          </div>
+          <table>
+            <thead><tr><th>component</th><th>diff</th><th>GT</th><th>Pred</th></tr></thead>
+            <tbody>{diff_rows}</tbody>
+          </table>
+          <div class="netlists">
+            <div><h3>GT</h3><pre>{html.escape(row.get('expected_netlist') or '')}</pre></div>
+            <div><h3>Pred</h3><pre>{html.escape(row.get('predicted_netlist') or '')}</pre></div>
+          </div>
+          <details><summary>Unified diff</summary><pre>{html.escape(raw_diff)}</pre></details>
+        </section>
+        """
+
+    case_nav = " ".join(f'<a href="#{html.escape(row["id"])}">{html.escape(row["id"])}</a>' for row in wrong_rows)
+    case_html = "\n".join(case_section(row) for row in wrong_rows)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Netlist Eval Report</title>
+  <style>
+    :root {{ color-scheme: light; --bg:#f6f7f9; --panel:#ffffff; --ink:#17202a; --muted:#68717d; --line:#d9dee6; --bad:#b42318; --warn:#9a6700; --ok:#116329; --blue:#2451a6; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--ink); }}
+    header {{ padding:24px 28px 12px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }}
+    h1 {{ margin:0 0 14px; font-size:24px; letter-spacing:0; }}
+    h2 {{ margin:0; font-size:20px; }}
+    h3 {{ margin:0 0 8px; font-size:14px; }}
+    .metrics {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:12px; }}
+    .metric {{ background:#f9fafb; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }}
+    .metric div {{ color:var(--muted); font-size:12px; }}
+    .metric strong {{ display:block; font-size:22px; margin:2px 0; }}
+    .metric span {{ color:var(--muted); font-size:12px; }}
+    nav {{ display:flex; gap:6px; flex-wrap:wrap; max-height:74px; overflow:auto; }}
+    nav a, .case-head a {{ color:var(--blue); text-decoration:none; border:1px solid var(--line); background:#fff; border-radius:6px; padding:3px 7px; }}
+    main {{ padding:18px 28px 36px; }}
+    .case {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; margin:0 0 18px; padding:16px; }}
+    .case-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:12px; }}
+    .case-head p {{ margin:6px 0 0; color:var(--muted); }}
+    .case-grid {{ display:grid; grid-template-columns:minmax(260px,420px) 1fr; gap:14px; align-items:start; margin-bottom:14px; }}
+    .image-wrap {{ border:1px solid var(--line); border-radius:8px; background:#fff; padding:8px; }}
+    img {{ display:block; width:100%; height:auto; max-height:300px; object-fit:contain; }}
+    .score-panel {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; }}
+    .score-panel div {{ border:1px solid var(--line); border-radius:8px; padding:9px; background:#fafafa; }}
+    .score-panel b {{ display:block; color:var(--muted); font-size:12px; margin-bottom:3px; }}
+    table {{ width:100%; border-collapse:collapse; margin:12px 0; table-layout:fixed; }}
+    th, td {{ border:1px solid var(--line); padding:7px 8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; }}
+    th {{ background:#f2f4f7; color:#4b5563; }}
+    code, pre {{ font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }}
+    pre {{ margin:0; padding:10px; background:#101828; color:#f8fafc; border-radius:8px; overflow:auto; max-height:340px; }}
+    .netlists {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+    .tag {{ display:inline-block; border-radius:999px; padding:2px 7px; background:#eef2ff; color:#3730a3; font-size:12px; }}
+    .tag.missing, .tag.extra, .tag.type {{ background:#fee4e2; color:var(--bad); }}
+    .tag.nodes, .tag.polarity {{ background:#fef0c7; color:var(--warn); }}
+    details {{ margin-top:12px; }}
+    summary {{ cursor:pointer; color:var(--blue); }}
+    @media (max-width: 860px) {{ header {{ position:static; }} main, header {{ padding-left:14px; padding-right:14px; }} .case-grid, .netlists {{ grid-template-columns:1fr; }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Netlist Eval Report</h1>
+    <div class="metrics">
+      {metric_card("Total", str(total))}
+      {metric_card("Strict match", f"{strict_ok}/{total}", f"{strict_pct:.1f}% with nodes")}
+      {metric_card("Ignore-node match", f"{ignore_ok}/{total}", f"{ignore_pct:.1f}% components")}
+      {metric_card("Wrong", str(len(wrong_rows)), f"{len(node_only)} node-only, {len(component_wrong)} component")}
+    </div>
+    <nav>{case_nav}</nav>
+  </header>
+  <main>
+    {case_html or '<section class="case"><h2>No wrong cases found.</h2></section>'}
+  </main>
+</body>
+</html>
+"""
+
+
+def _write_outputs(args: argparse.Namespace, selected: list[Path], results: list[dict[str, Any]], started: float) -> dict[str, Any]:
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    payload = _payload(args, selected, results, started)
+    args.output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_eval_report(payload, selected)
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -312,12 +651,9 @@ def main() -> int:
             print(f"[{index}/{len(selected)}] {case_dir.name}", flush=True)
             row = evaluate_case(case_dir, llm, args.quiet_build_log, args.print_prompt)
             results.append(row)
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            payload = _payload(args, selected, results, started)
-            args.output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            _write_outputs(args, selected, results, started)
     else:
         print(f"Running {len(selected)} cases with workers={args.workers}", flush=True)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
                 executor.submit(_run_case_subprocess, case_dir, args.case_timeout, args.print_prompt): case_dir
@@ -352,8 +688,7 @@ def main() -> int:
                         "duration_seconds": 0,
                     }
                 results.append(row)
-                payload = _payload(args, selected, sorted(results, key=lambda item: _case_key(Path(item["id"]))), started)
-                args.output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                _write_outputs(args, selected, sorted(results, key=lambda item: _case_key(Path(item["id"]))), started)
                 print(
                     f"[{index}/{len(selected)}] {row['id']} success={row.get('success')} "
                     f"component_match={row['score'].get('component_multiset_match_ignore_nodes')} "
@@ -361,7 +696,9 @@ def main() -> int:
                     flush=True,
                 )
 
-    print_summary(_payload(args, selected, results, started))
+    final_results = sorted(results, key=lambda item: _case_key(Path(item["id"])))
+    final_payload = _write_outputs(args, selected, final_results, started)
+    print_summary(final_payload)
     if args.print_prompt:
         print_prompts(results)
     if args.print_netlists:

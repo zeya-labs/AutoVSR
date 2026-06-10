@@ -251,6 +251,8 @@ def _run_case_subprocess(case_dir: Path, timeout: int, return_build_prompt: bool
 
 
 def _report_dir(output_path: Path) -> Path:
+    if output_path.name == "results.json":
+        return output_path.parent
     return output_path.with_suffix("")
 
 
@@ -397,6 +399,8 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
 
     case_links: dict[str, dict[str, str]] = {}
     wrong_dir = out_dir / "wrong_cases"
+    if wrong_dir.exists():
+        shutil.rmtree(wrong_dir)
     wrong_dir.mkdir(parents=True, exist_ok=True)
     for row in wrong_rows:
         case_dir = selected_by_id.get(row["id"], Path(row.get("image_path", "")).parent)
@@ -631,7 +635,8 @@ def main() -> int:
         args.output = (
             PROJECT_ROOT
             / "output"
-            / f"{output_stem}.json"
+            / output_stem
+            / "results.json"
         )
 
     cases = sorted([p for p in args.level_dir.glob("q*") if p.is_dir()], key=_case_key)

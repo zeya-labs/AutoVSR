@@ -516,7 +516,9 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
 
     selected_by_id = {p.name: p for p in selected}
     rows = sorted(payload.get("results") or [], key=lambda item: _case_key(Path(item["id"])))
-    wrong_rows = [row for row in rows if _is_wrong(row)]
+    excluded_rows = [row for row in rows if _excluded_by_extra_step_self_source(row)]
+    excluded_ids = {row["id"] for row in excluded_rows}
+    wrong_rows = [row for row in rows if _is_wrong(row) and row["id"] not in excluded_ids]
     display_rows = wrong_rows
     node_only = [
         row
@@ -542,8 +544,10 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
         "wrong_count": len(wrong_rows),
         "node_only_count": len(node_only),
         "component_wrong_count": len(component_wrong),
+        "excluded_count": len(excluded_rows),
         "display_ids": [row["id"] for row in display_rows],
         "wrong_ids": [row["id"] for row in wrong_rows],
+        "excluded_ids": [row["id"] for row in excluded_rows],
         "node_only_ids": [row["id"] for row in node_only],
         "component_wrong_ids": [row["id"] for row in component_wrong],
         "error_tags_by_id": {row["id"]: _case_error_tags(row) for row in display_rows},

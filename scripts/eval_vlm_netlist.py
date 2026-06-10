@@ -434,11 +434,7 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
     selected_by_id = {p.name: p for p in selected}
     rows = sorted(payload.get("results") or [], key=lambda item: _case_key(Path(item["id"])))
     wrong_rows = [row for row in rows if _is_wrong(row)]
-    updated_ids = set(payload.get("experiment", {}).get("updated_cases") or [])
-    display_ids = {row["id"] for row in wrong_rows}
-    display_ids.update(updated_ids)
-    display_ids.update(row["id"] for row in rows if (row.get("repair") or {}).get("method") == "tiled")
-    display_rows = [row for row in rows if row["id"] in display_ids]
+    display_rows = wrong_rows
     node_only = [
         row
         for row in wrong_rows
@@ -463,12 +459,10 @@ def _write_eval_report(payload: dict[str, Any], selected: list[Path]) -> None:
         "wrong_count": len(wrong_rows),
         "node_only_count": len(node_only),
         "component_wrong_count": len(component_wrong),
-        "updated_count": len(updated_ids),
         "display_ids": [row["id"] for row in display_rows],
         "wrong_ids": [row["id"] for row in wrong_rows],
         "node_only_ids": [row["id"] for row in node_only],
         "component_wrong_ids": [row["id"] for row in component_wrong],
-        "updated_ids": sorted(updated_ids, key=lambda item: _case_key(Path(item))),
     }
     (out_dir / "wrong_cases.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     (out_dir / "wrong_ids.txt").write_text("\n".join(manifest["wrong_ids"]) + ("\n" if wrong_rows else ""), encoding="utf-8")
@@ -551,7 +545,6 @@ def _render_html_report(
     ignore_ok = int(summary.get("component_multiset_match_ignore_nodes") or 0)
     strict_pct = (strict_ok / total * 100) if total else 0
     ignore_pct = (ignore_ok / total * 100) if total else 0
-    updated_count = len(payload.get("experiment", {}).get("updated_cases") or [])
 
     def metric_card(label: str, value: str, detail: str = "") -> str:
         return (
@@ -676,7 +669,7 @@ def _render_html_report(
       {metric_card("Strict match", f"{strict_ok}/{total}", f"{strict_pct:.1f}% with nodes")}
       {metric_card("Ignore-node match", f"{ignore_ok}/{total}", f"{ignore_pct:.1f}% components")}
       {metric_card("Wrong", str(len(wrong_rows)), f"{len(node_only)} node-only, {len(component_wrong)} component")}
-      {metric_card("Shown", str(len(display_rows)), f"{updated_count} updated cases")}
+      {metric_card("Shown", str(len(display_rows)), "wrong cases")}
     </div>
     <nav>{case_nav}</nav>
   </header>

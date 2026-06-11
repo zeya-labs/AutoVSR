@@ -120,8 +120,14 @@ Return ONLY one JSON object:
 
 Rules:
 - This is only a tile. Report what is visible; do not infer hidden off-tile endpoints.
-- If a component is cut off by the tile boundary, mark visibility as "partial".
-- Prefer exact component labels and exact integer node labels when visible.
+- Mark a component "complete" only when the whole symbol and both adjacent blue node labels are visible in this crop.
+- If either terminal node label is hidden, cut off, or requires following a wire outside the crop, mark visibility as "partial" and use "unknown" for that endpoint.
+- A component endpoint is the nearest blue integer node on the same uninterrupted wire segment touching that terminal.
+- Components block connectivity: never carry a node label through a resistor, source, capacitor, or inductor to a farther node.
+- For vertical components, use the adjacent blue node immediately above and immediately below the component.
+- For horizontal components, use the adjacent blue node immediately left and immediately right of the component.
+- Include voltage/current sources only when the actual source symbol and its label are visible. Do not infer sources from the question text.
+- Preserve exact drawn component labels and exact integer node labels when visible.
 - Do not include ordinary wire segments as shorts.
 - Include a short only if the crop visibly shorts two different labeled nodes.
 - Do not invent components or node labels hidden outside the crop.
@@ -149,7 +155,12 @@ Rules:
 - Preserve component names and values exactly as drawn.
 - Use integer node labels from the full image; node 0 is ground.
 - Merge duplicate observations of the same component from adjacent tiles.
-- Resolve partial tile observations using the full image.
+- Resolve partial tile observations using the full image, but do not propagate node labels through intervening components.
+- For every component, choose the two adjacent blue node labels that directly touch its terminals in the full image.
+- A vertical component uses the adjacent blue node immediately above and immediately below it; a horizontal component uses the adjacent blue node immediately left and immediately right of it.
+- If a complete tile observation gives both endpoint labels for a component, treat it as strong local evidence unless the full image clearly contradicts it.
+- Include voltage/current sources only if a source symbol with that label is visibly drawn in the full image. Never create I/V sources from the question text, node variables, or equations.
+- Source values must be exactly the drawn label (for example "V1"), not "DC V1" or a derived expression.
 - Do not include ordinary wire segments as components.
 - Do not include self-loop shorts.
 - Add a short only when the full image explicitly shorts two different labeled nodes.

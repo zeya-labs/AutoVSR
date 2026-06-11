@@ -12,8 +12,10 @@ meant to generalize beyond CircuitSense-specific detectors:
 4. cascade: structured on all selected cases, then vote only structured residuals.
 5. tiled: transcribe overlapping image tiles, then merge tile observations with
    the full image.
-6. audit: visually audit a candidate netlist against the full image.
-7. tile_consensus: use complete tile observations as a conservative fallback.
+6. tiled_vote: run tiled several times for every case and majority-vote the
+   structured component graph.
+7. audit: visually audit a candidate netlist against the full image.
+8. tile_consensus: use complete tile observations as a conservative fallback.
 
 Methods named oracle_* use ground-truth eval scores to select cases or choose
 between candidates. They are diagnostics/upper bounds, not deployable inference.
@@ -474,7 +476,7 @@ Create the structured circuit graph JSON from the image."""
     return _make_candidate(row, netlist, "structured", raw, {"structured": data})
 
 
-def tiled_rewrite(llm: Any, row: dict[str, Any], grid: int = 2, overlap: float = 0.18) -> dict[str, Any]:
+def _run_tiled_merge(llm: Any, row: dict[str, Any], grid: int = 2, overlap: float = 0.18) -> dict[str, Any]:
     tile_payloads = []
     raw_tile_responses = []
     with TemporaryDirectory(prefix=f"{row['id']}_tiles_") as tmp:
@@ -516,18 +518,76 @@ TILE OBSERVATIONS:
 Use the full image plus these tile observations to produce the complete global structured circuit graph."""
         raw_merge = _invoke_vlm(llm, TILE_MERGE_SYSTEM_PROMPT, row["image_path"], merge_text)
     data = _json_from_text(raw_merge)
+    return {
+        "structured": data,
+        "raw_merge": raw_merge,
+        "tile_payloads": tile_payloads,
+        "raw_tile_responses": raw_tile_responses,
+        "merge_system_prompt": TILE_MERGE_SYSTEM_PROMPT,
+        "merge_human_text": merge_text,
+    }
+
+
+def tiled_rewrite(llm: Any, row: dict[str, Any], grid: int = 2, overlap: float = 0.18) -> dict[str, Any]:
+    merged = _run_tiled_merge(llm, row, grid=grid, overlap=overlap)
+    data = merged["structured"]
     netlist = _compile_structured(data, _analysis_type(row))
     return _make_candidate(
         row,
         netlist,
         "tiled",
-        raw_merge,
+        merged["raw_merge"],
         {
             "structured": data,
-            "tile_payloads": tile_payloads,
-            "raw_tile_responses": raw_tile_responses,
-            "merge_system_prompt": TILE_MERGE_SYSTEM_PROMPT,
-            "merge_human_text": merge_text,
+            "tile_payloads": merged["tile_payloads"],
+            "raw_tile_responses": merged["raw_tile_responses"],
+            "merge_system_prompt": merged["merge_system_prompt"],
+            "merge_human_text": merged["merge_human_text"],
+        },
+    )
+
+
+def tiled_vote_rewrite(
+    llm: Any,
+    row: dict[str, Any],
+    samples: int,
+    grid: int = 2,
+    overlap: float = 0.18,
+) -> dict[str, Any]:
+    payloads = []
+    traces = []
+    parse_errors = []
+    for sample_index in range(samples):
+        try:
+            merged = _run_tiled_merge(llm, row, grid=grid, overlap=overlap)
+            data = merged["structured"]
+            payloads.append(data)
+            traces.append(
+                {
+                    "sample": sample_index + 1,
+                    "structured": data,
+                    "initial_structured": merged["structured"],
+                    "tile_payloads": merged["tile_payloads"],
+                    "raw_tile_responses": merged["raw_tile_responses"],
+                    "raw_response": merged["raw_merge"],
+                }
+            )
+        except Exception as exc:
+            parse_errors.append(f"sample {sample_index + 1}: {type(exc).__name__}: {exc}")
+
+    if not payloads:
+        raise ValueError(f"all tiled vote samples failed: {parse_errors}")
+
+    netlist, voted = _vote_structured_payloads(payloads, _analysis_type(row))
+    return _make_candidate(
+        row,
+        netlist,
+        "tiled_vote",
+        json.dumps(voted, indent=2, ensure_ascii=False),
+        {
+            "voted": voted,
+            "samples": traces,
+            "parse_errors": parse_errors,
         },
     )
 
@@ -941,6 +1001,8 @@ def _run_one_method(method: str, row: dict[str, Any], vote_samples: int) -> dict
             return voting_rewrite(llm, row, vote_samples)
         if method == "tiled":
             return tiled_rewrite(llm, row)
+        if method == "tiled_vote":
+            return tiled_vote_rewrite(llm, row, vote_samples)
         if method == "audit":
             return audit_rewrite(llm, row)
         if method == "endpoint_audit":
@@ -1026,6 +1088,7 @@ def main() -> int:
             "structured",
             "vote",
             "tiled",
+            "tiled_vote",
             "audit",
             "endpoint_audit",
             "tile_consensus",

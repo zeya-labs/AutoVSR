@@ -13,8 +13,10 @@ meant to generalize beyond CircuitSense-specific detectors:
 5. tiled: transcribe overlapping image tiles, then merge tile observations with
    the full image.
 6. audit: visually audit a candidate netlist against the full image.
-7. tile_consensus: use complete tile observations as a conservative fallback
-   for remaining endpoint-only residuals.
+7. tile_consensus: use complete tile observations as a conservative fallback.
+
+Methods named oracle_* use ground-truth eval scores to select cases or choose
+between candidates. They are diagnostics/upper bounds, not deployable inference.
 
 Each method writes its own JSON and HTML report under the experiment directory.
 """
@@ -835,7 +837,7 @@ def _scored_residual_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return residual
 
 
-def run_residual_fix(
+def run_oracle_residual_fix(
     baseline: dict[str, Any],
     rows: list[dict[str, Any]],
     selected_paths: list[Path],
@@ -846,14 +848,14 @@ def run_residual_fix(
 ) -> dict[str, Any]:
     residual = _scored_residual_rows(rows)
     if not residual:
-        return _write_method_payload(baseline, [], selected_paths, out_dir / "residual_fix" / "results.json")
+        return _write_method_payload(baseline, [], selected_paths, out_dir / "oracle_residual_fix" / "results.json")
 
     audit_payload = run_method_parallel(
         "audit",
         baseline,
         residual,
         selected_paths,
-        out_dir / "residual_fix",
+        out_dir / "oracle_residual_fix",
         vote_samples,
         workers,
         quiet,
@@ -876,7 +878,7 @@ def run_residual_fix(
                 baseline,
                 tile_inputs,
                 selected_paths,
-                out_dir / "residual_fix",
+                out_dir / "oracle_residual_fix",
                 vote_samples,
                 workers,
                 quiet,
@@ -894,16 +896,17 @@ def run_residual_fix(
         else:
             final_rows.append(candidate)
 
-    payload = _write_method_payload(baseline, final_rows, selected_paths, out_dir / "residual_fix" / "results.json")
+    payload = _write_method_payload(baseline, final_rows, selected_paths, out_dir / "oracle_residual_fix" / "results.json")
     payload["experiment"] = {
-        "method": "residual_fix",
+        "method": "oracle_residual_fix",
+        "uses_ground_truth_scores": True,
         "baseline_path": baseline.get("output_path"),
         "audit_cases": [row["id"] for row in residual],
         "tile_consensus_cases": list(tile_consensus_rows_by_id),
         "updated_cases": [row["id"] for row in final_rows],
         "workers": workers,
     }
-    _write_json(out_dir / "residual_fix" / "results.json", payload)
+    _write_json(out_dir / "oracle_residual_fix" / "results.json", payload)
     _write_eval_report(payload, selected_paths)
     return payload
 
@@ -1015,7 +1018,7 @@ def main() -> int:
             "audit",
             "endpoint_audit",
             "tile_consensus",
-            "residual_fix",
+            "oracle_residual_fix",
             "cascade",
             "all",
             "oracle",
@@ -1049,8 +1052,8 @@ def main() -> int:
             payload = run_cascade(baseline, rows, selected_paths, out_dir, args.vote_samples, args.workers, args.quiet)
             print(f"{method}: {payload['summary']}", flush=True)
             continue
-        if method == "residual_fix":
-            payload = run_residual_fix(
+        if method == "oracle_residual_fix":
+            payload = run_oracle_residual_fix(
                 baseline,
                 rows,
                 selected_paths,

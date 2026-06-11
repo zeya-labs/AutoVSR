@@ -314,11 +314,14 @@ def create_llm(logger=None):
         # Tongyi Qianwen (OpenAI-compatible API)
         from langchain_openai import ChatOpenAI
         base_url = llm_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        model_kwargs = {
-            "extra_body": {
-                "enable_thinking": bool(llm_config.get("enable_thinking", False)),
-            }
+        extra_body = {
+            "enable_thinking": bool(llm_config.get("enable_thinking", False)),
         }
+        if "thinking_budget" in llm_config:
+            extra_body["thinking_budget"] = int(llm_config["thinking_budget"])
+        if "vl_high_resolution_images" in llm_config:
+            extra_body["vl_high_resolution_images"] = bool(llm_config["vl_high_resolution_images"])
+        model_kwargs = {"extra_body": extra_body}
         llm = ChatOpenAI(
             model=model,
             api_key=api_key,
@@ -328,7 +331,12 @@ def create_llm(logger=None):
             timeout=request_timeout,
             model_kwargs=model_kwargs,
         )
-        llm_info = f"✅ LLM: {provider}/{model} (base_url: {base_url})"
+        extras = [f"thinking={extra_body['enable_thinking']}"]
+        if "thinking_budget" in extra_body:
+            extras.append(f"thinking_budget={extra_body['thinking_budget']}")
+        if "vl_high_resolution_images" in extra_body:
+            extras.append(f"vl_high_resolution_images={extra_body['vl_high_resolution_images']}")
+        llm_info = f"✅ LLM: {provider}/{model} ({', '.join(extras)}) (base_url: {base_url})"
         print(llm_info)
         if logger:
             logger.info(llm_info)

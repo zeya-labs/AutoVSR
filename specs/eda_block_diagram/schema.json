@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autovsr.local/schemas/eda_block_diagram.v0.1.schema.json",
+  "title": "EDA Block Diagram JSON",
+  "type": "object",
+  "required": ["schema", "source", "diagram", "nodes", "ports", "edges", "groups"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "eda_block_diagram.v0.1"
+    },
+    "source": {
+      "type": "object",
+      "required": ["image_path"],
+      "additionalProperties": true,
+      "properties": {
+        "image_path": {"type": "string", "minLength": 1},
+        "image_width": {"type": "integer", "minimum": 1},
+        "image_height": {"type": "integer", "minimum": 1}
+      }
+    },
+    "diagram": {
+      "type": "object",
+      "required": ["view_type"],
+      "additionalProperties": true,
+      "properties": {
+        "title": {"type": ["string", "null"]},
+        "domain": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "view_type": {
+          "type": "string",
+          "enum": ["block_diagram", "flow_diagram", "mixed", "unknown"]
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "ports": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/port"}
+    },
+    "edges": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/edge"}
+    },
+    "groups": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/group"}
+    },
+    "texts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/text"}
+    },
+    "annotations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/annotation"}
+    },
+    "legend": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "bbox": {
+      "type": "object",
+      "required": ["x", "y", "w", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "w": {"type": "number", "minimum": 0},
+        "h": {"type": "number", "minimum": 0}
+      }
+    },
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"}
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "text_payload": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "main": {"type": ["string", "null"]},
+        "lines": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "formula": {"type": ["string", "null"]}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "kind", "label"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {
+          "type": "string",
+          "enum": ["functional_block", "operator", "source_sink", "connector", "subsystem", "unknown"]
+        },
+        "subtype": {"type": "string"},
+        "label": {"type": ["string", "null"]},
+        "text": {"$ref": "#/$defs/text_payload"},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "ports": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "properties": {"type": "object"},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "evidence": {"type": "string"}
+      }
+    },
+    "port": {
+      "type": "object",
+      "required": ["id", "node", "direction"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "node": {"$ref": "#/$defs/id"},
+        "name": {"type": ["string", "null"]},
+        "direction": {
+          "type": "string",
+          "enum": ["in", "out", "inout", "unknown"]
+        },
+        "side": {
+          "type": "string",
+          "enum": ["left", "right", "top", "bottom", "center", "unknown"]
+        },
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "signal": {"type": ["string", "null"]},
+        "confidence": {"$ref": "#/$defs/confidence"}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["id", "kind", "source", "target", "direction"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {
+          "type": "string",
+          "enum": ["signal", "feedback", "bus", "power_or_clock", "physical", "annotation_link", "unknown"]
+        },
+        "source": {"$ref": "#/$defs/id"},
+        "target": {"$ref": "#/$defs/id"},
+        "direction": {
+          "type": "string",
+          "enum": ["directed", "undirected", "unknown"]
+        },
+        "label": {"type": ["string", "null"]},
+        "style": {"type": "object"},
+        "path": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/point"}
+        },
+        "branches": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "evidence": {"type": "string"}
+      }
+    },
+    "group": {
+      "type": "object",
+      "required": ["id", "kind", "label", "contains"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {
+          "type": "string",
+          "enum": ["region", "subsystem_boundary", "chip_or_board", "loop_annotation", "lane_or_domain"]
+        },
+        "label": {"type": ["string", "null"]},
+        "style": {"type": "object"},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "contains": {
+          "type": "object",
+          "required": ["nodes", "edges"],
+          "additionalProperties": true,
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/id"}
+            },
+            "edges": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/id"}
+            },
+            "groups": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/id"}
+            }
+          }
+        },
+        "ports": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "confidence": {"$ref": "#/$defs/confidence"}
+      }
+    },
+    "text": {
+      "type": "object",
+      "required": ["id", "text", "role"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "text": {"type": "string"},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "role": {
+          "type": "string",
+          "enum": ["node_label", "edge_label", "port_label", "group_label", "formula", "caption", "axis_or_tick", "note", "unknown"]
+        },
+        "attached_to": {"$ref": "#/$defs/id"},
+        "confidence": {"$ref": "#/$defs/confidence"}
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"type": "string"},
+        "label": {"type": ["string", "null"]},
+        "style": {"type": "object"},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "related_to": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "confidence": {"$ref": "#/$defs/confidence"}
+      }
+    }
+  }
+}

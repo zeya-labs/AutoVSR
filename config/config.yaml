@@ -7,12 +7,17 @@ llm:
   # Default public test configuration.
   # Provider options: google, openai, azure, openrouter, qwen, anthropic, glm
   provider: "qwen"
-  model: "qwen3-vl-plus"
+  model: "qwen3.7-plus"
   temperature: 0
-  max_tokens: 4096
-  request_timeout: 120
+  max_tokens: 65536
+  request_timeout: 300
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   api_key: ""
+  enable_thinking: true
+  # Leave thinking_budget unset to let Qwen3.7 use its full default thinking budget.
+  # For faster/cheaper runs, set an integer budget such as 4096.
+  # thinking_budget: 4096
+  vl_high_resolution_images: true
 
   # Google Gemini example
   # provider: "google"

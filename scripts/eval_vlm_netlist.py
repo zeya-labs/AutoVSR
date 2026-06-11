@@ -9,6 +9,7 @@ This runs only the Netlist build node, using the LLM configured in
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import difflib
 import html
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from langchain_core.messages import HumanMessage, SystemMessage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -183,6 +185,118 @@ def _load_config_meta() -> dict[str, Any]:
     return {"llm": llm, "ir_netlist": (config.get("ir") or {}).get("netlist") or {}}
 
 
+STRUCTURED_NETLIST_SYSTEM_PROMPT = """You are a circuit schematic transcriber.
+
+Convert the schematic into a structured circuit graph, not prose.
+Return ONLY one JSON object:
+{
+  "components": [
+    {"name": "R1", "type": "R", "nodes": ["1", "2"], "value": "R1"}
+  ],
+  "shorts": [
+    {"name": "W1", "nodes": ["1", "2"], "evidence": "explicit short between different labeled nodes"}
+  ]
+}
+
+Rules:
+- Use integer node labels from the image; node 0 is ground.
+- Preserve drawn component names and values exactly.
+- Include every visible labeled R/C/L/V/I component exactly once, including edge components, bottom/top branches, and parallel branches.
+- Include voltage/current sources only when the actual source symbol and its label are visibly drawn. Never create I/V sources from question text, current annotations, node variables, or equations.
+- A component endpoint is the nearest blue node label on the same uninterrupted conductor at that terminal.
+- Components block connectivity; never propagate a node label through a resistor, capacitor, inductor, or source.
+- For vertical components, use the adjacent blue node immediately above and immediately below the component.
+- For horizontal components, use the adjacent blue node immediately left and immediately right of the component.
+- Do not include ordinary wire segments as components.
+- Do not include a short whose endpoints are identical.
+- Add a short only when the schematic explicitly shorts two different labeled nodes.
+"""
+
+
+def _json_from_text(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    source = text or ""
+    for match in re.finditer(r"\{", source):
+        try:
+            data, _ = decoder.raw_decode(source[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise ValueError("no JSON object found in structured response")
+
+
+def _source_style_for_case(case_dir: Path) -> str:
+    return "bare_step" if "level1" in str(case_dir) else "symbolic"
+
+
+def _analysis_type_from_question(question: str) -> str:
+    return "transfer_function" if "transfer function" in question.lower() else "transient_response"
+
+
+def _structured_line(component: dict[str, Any], analysis_type: str, source_style: str) -> str | None:
+    name = str(component.get("name") or "").strip()
+    ctype = str(component.get("type") or name[:1]).strip().upper()
+    nodes = component.get("nodes") or []
+    if not name or len(nodes) < 2:
+        return None
+    node1, node2 = str(nodes[0]).strip(), str(nodes[1]).strip()
+    if not node1 or not node2 or "unknown" in {node1.lower(), node2.lower()}:
+        return None
+    value = str(component.get("value") or name).strip()
+    if ctype in {"V", "I"}:
+        if source_style == "bare_step":
+            return f"{name} {node1} {node2} step"
+        source_mode = "s" if analysis_type == "transfer_function" else "step"
+        return f"{name} {node1} {node2} {source_mode} {value}"
+    if ctype in {"R", "C", "L", "G"}:
+        return f"{name} {node1} {node2} {value}"
+    return f"{name} {node1} {node2} {value}"
+
+
+def _compile_structured_netlist(data: dict[str, Any], analysis_type: str, source_style: str) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for comp in data.get("components") or []:
+        if not isinstance(comp, dict):
+            continue
+        line = _structured_line(comp, analysis_type, source_style)
+        if not line:
+            continue
+        name = line.split()[0]
+        if name in seen:
+            continue
+        seen.add(name)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _invoke_structured_netlist(case_dir: Path, llm: Any, question: str) -> tuple[str, str, dict[str, Any]]:
+    image_path = case_dir / f"{case_dir.name}_image.png"
+    media_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+    image_data = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    human_text = f"""CASE: {case_dir.name}
+
+QUESTION:
+{question}
+
+Create the structured circuit graph JSON from the image."""
+    messages = [
+        SystemMessage(content=STRUCTURED_NETLIST_SYSTEM_PROMPT),
+        HumanMessage(
+            content=[
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_data}"}},
+                {"type": "text", "text": human_text},
+            ]
+        ),
+    ]
+    response = llm.invoke(messages)
+    raw = response.content if isinstance(response.content, str) else json.dumps(response.content, ensure_ascii=False)
+    data = _json_from_text(raw)
+    netlist = _compile_structured_netlist(data, _analysis_type_from_question(question), _source_style_for_case(case_dir))
+    return netlist, raw, data
+
+
 def _initial_state(case_dir: Path, *, return_build_prompt: bool = False) -> dict[str, Any]:
     qid = case_dir.name
     question = _read(case_dir / f"{qid}_question.txt")
@@ -201,7 +315,13 @@ def _initial_state(case_dir: Path, *, return_build_prompt: bool = False) -> dict
     }
 
 
-def evaluate_case(case_dir: Path, llm: Any, quiet_build_log: bool, return_build_prompt: bool = False) -> dict[str, Any]:
+def evaluate_case(
+    case_dir: Path,
+    llm: Any,
+    quiet_build_log: bool,
+    return_build_prompt: bool = False,
+    build_mode: str = "netlist",
+) -> dict[str, Any]:
     from src.nodes.netlist.build import build_netlist_node
 
     qid = case_dir.name
@@ -209,11 +329,33 @@ def evaluate_case(case_dir: Path, llm: Any, quiet_build_log: bool, return_build_
     state = _initial_state(case_dir, return_build_prompt=return_build_prompt)
     case_start = time.time()
     try:
-        if quiet_build_log:
-            with contextlib.redirect_stdout(io.StringIO()):
-                built = build_netlist_node(state, llm)
+        if build_mode == "structured":
+            predicted, raw_structured, structured = _invoke_structured_netlist(case_dir, llm, state["question"])
+            from src.ir import NetlistIR
+
+            ir = None
+            error = None
+            if predicted.strip():
+                try:
+                    ir = NetlistIR.from_netlist(predicted)
+                except Exception as exc:
+                    error = f"structured netlist parse error: {type(exc).__name__}: {exc}"
+            else:
+                error = "structured build produced empty netlist"
+            built = {
+                "ir": ir,
+                "ir_code": predicted,
+                "error": error,
+                "metrics": {},
+                "structured_response": raw_structured,
+                "structured_graph": structured,
+            }
         else:
-            built = build_netlist_node(state, llm)
+            if quiet_build_log:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    built = build_netlist_node(state, llm)
+            else:
+                built = build_netlist_node(state, llm)
         predicted = built.get("ir_code") or ""
         score = _score_netlist(predicted, expected)
         row = {
@@ -226,8 +368,13 @@ def evaluate_case(case_dir: Path, llm: Any, quiet_build_log: bool, return_build_
             "predicted_netlist": predicted,
             "score": score,
             "metrics": built.get("metrics") or {},
+            "build_mode": build_mode,
             "duration_seconds": round(time.time() - case_start, 2),
         }
+        if built.get("structured_response"):
+            row["structured_response"] = built["structured_response"]
+        if built.get("structured_graph"):
+            row["structured_graph"] = built["structured_graph"]
         if built.get("build_prompt"):
             row["build_prompt"] = built["build_prompt"]
         return row
@@ -241,17 +388,25 @@ def evaluate_case(case_dir: Path, llm: Any, quiet_build_log: bool, return_build_
             "expected_netlist": expected,
             "predicted_netlist": "",
             "score": _score_netlist("", expected),
+            "build_mode": build_mode,
             "duration_seconds": round(time.time() - case_start, 2),
         }
 
 
-def _run_case_subprocess(case_dir: Path, timeout: int, return_build_prompt: bool = False) -> dict[str, Any]:
+def _run_case_subprocess(
+    case_dir: Path,
+    timeout: int,
+    return_build_prompt: bool = False,
+    build_mode: str = "netlist",
+) -> dict[str, Any]:
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
         "--case-dir",
         str(case_dir),
         "--quiet-build-log",
+        "--build-mode",
+        build_mode,
     ]
     if return_build_prompt:
         cmd.append("--capture-prompt")
@@ -280,6 +435,7 @@ def _run_case_subprocess(case_dir: Path, timeout: int, return_build_prompt: bool
         "expected_netlist": _read(case_dir / f"{case_dir.name}_netlist.txt"),
         "predicted_netlist": "",
         "score": _score_netlist("", _read(case_dir / f"{case_dir.name}_netlist.txt")),
+        "build_mode": build_mode,
         "duration_seconds": 0,
     }
 
@@ -835,6 +991,12 @@ def main() -> int:
     parser.add_argument("--case-dir", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--capture-prompt", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--build-mode",
+        choices=("netlist", "structured"),
+        default="netlist",
+        help="Generation mode: direct netlist prompt or structured graph JSON compiled to netlist.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -848,7 +1010,7 @@ def main() -> int:
 
     if args.case_dir is not None:
         llm = autovsr_main.create_llm()
-        row = evaluate_case(args.case_dir, llm, args.quiet_build_log, args.capture_prompt)
+        row = evaluate_case(args.case_dir, llm, args.quiet_build_log, args.capture_prompt, args.build_mode)
         print("__RESULT_JSON__" + json.dumps(row, ensure_ascii=False))
         return 0
 
@@ -871,6 +1033,8 @@ def main() -> int:
             if args.case_id
             else f"vlm_netlist_{args.level}_start{args.start}_limit{args.limit}_workers{args.workers}"
         )
+        if args.build_mode != "netlist":
+            output_stem += f"_{args.build_mode}"
         args.output = (
             PROJECT_ROOT
             / "output"
@@ -893,14 +1057,14 @@ def main() -> int:
         llm = autovsr_main.create_llm()
         for index, case_dir in enumerate(selected, 1):
             print(f"[{index}/{len(selected)}] {case_dir.name}", flush=True)
-            row = evaluate_case(case_dir, llm, args.quiet_build_log, args.print_prompt)
+            row = evaluate_case(case_dir, llm, args.quiet_build_log, args.print_prompt, args.build_mode)
             results.append(row)
             _write_outputs(args, selected, results, started)
     else:
         print(f"Running {len(selected)} cases with workers={args.workers}", flush=True)
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(_run_case_subprocess, case_dir, args.case_timeout, args.print_prompt): case_dir
+                executor.submit(_run_case_subprocess, case_dir, args.case_timeout, args.print_prompt, args.build_mode): case_dir
                 for case_dir in selected
             }
             for index, future in enumerate(as_completed(futures), 1):
@@ -917,6 +1081,7 @@ def main() -> int:
                         "expected_netlist": _read(case_dir / f"{case_dir.name}_netlist.txt"),
                         "predicted_netlist": "",
                         "score": _score_netlist("", _read(case_dir / f"{case_dir.name}_netlist.txt")),
+                        "build_mode": args.build_mode,
                         "duration_seconds": args.case_timeout,
                     }
                 except Exception as exc:
@@ -929,6 +1094,7 @@ def main() -> int:
                         "expected_netlist": _read(case_dir / f"{case_dir.name}_netlist.txt"),
                         "predicted_netlist": "",
                         "score": _score_netlist("", _read(case_dir / f"{case_dir.name}_netlist.txt")),
+                        "build_mode": args.build_mode,
                         "duration_seconds": 0,
                     }
                 results.append(row)
@@ -959,6 +1125,7 @@ def _payload(args: argparse.Namespace, selected: list[Path], results: list[dict[
         "config": _load_config_meta(),
         "level_dir": str(args.level_dir),
         "output_path": str(args.output),
+        "build_mode": args.build_mode,
         "start": args.start,
         "limit": args.limit,
         "case_id": args.case_id,

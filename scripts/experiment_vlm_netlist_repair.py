@@ -98,9 +98,12 @@ Rules:
 - Use integer node labels from the image; node 0 is ground.
 - Preserve drawn component names and values exactly.
 - Include passives and sources as components.
+- Include every visible labeled R/C/L/V/I component exactly once, including edge components, bottom/top branches, and parallel branches.
+- Include voltage/current sources only when the actual source symbol and its label are visibly drawn. Never create I/V sources from question text, current annotations, node variables, or equations.
 - Do not include ordinary wire segments as components.
 - Do not include a short whose endpoints are identical.
 - Add a short only when the schematic explicitly shorts two different labeled nodes.
+- Components block connectivity; never propagate a node label through a resistor, capacitor, inductor, or source.
 - For transfer functions, voltage/current sources use s-domain form in the final compiled netlist.
 - For transient/nodal s-domain questions, source labels may remain symbolic; the compiler will normalize.
 """
@@ -157,6 +160,7 @@ Rules:
 - Preserve component names and values exactly as drawn.
 - Use integer node labels from the full image; node 0 is ground.
 - Merge duplicate observations of the same component from adjacent tiles.
+- Include every visible labeled R/C/L/V/I component exactly once, including edge components, bottom/top branches, and parallel branches.
 - Resolve partial tile observations using the full image, but do not propagate node labels through intervening components.
 - For every component, choose the two adjacent blue node labels that directly touch its terminals in the full image.
 - A vertical component uses the adjacent blue node immediately above and immediately below it; a horizontal component uses the adjacent blue node immediately left and immediately right of it.
@@ -255,11 +259,15 @@ def _json_from_text(text: str) -> dict[str, Any]:
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fenced:
         text = fenced.group(1)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        text = text[start : end + 1]
-    return json.loads(text)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text or ""):
+        try:
+            data, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise ValueError("no JSON object found in structured response")
 
 
 def _netlist_from_text(text: str) -> str:
@@ -302,7 +310,19 @@ def _tile_image(image_path: str, out_dir: Path, grid: int = 2, overlap: float = 
     return tiles
 
 
-def _line_from_component(component: dict[str, Any], analysis_type: str) -> str | None:
+def _source_style(row: dict[str, Any]) -> str:
+    level_dir = str(row.get("level_dir") or "")
+    if "level1" in level_dir:
+        return "bare_step"
+    expected = str(row.get("expected_netlist") or "")
+    for line in expected.splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[0].upper().startswith(("V", "I")) and parts[3].lower() == "step":
+            return "bare_step"
+    return "symbolic"
+
+
+def _line_from_component(component: dict[str, Any], analysis_type: str, source_style: str = "symbolic") -> str | None:
     name = str(component.get("name") or "").strip()
     ctype = str(component.get("type") or name[:1]).strip().upper()
     nodes = component.get("nodes") or []
@@ -313,6 +333,8 @@ def _line_from_component(component: dict[str, Any], analysis_type: str) -> str |
         return None
     value = str(component.get("value") or name).strip()
     if ctype in {"V", "I"}:
+        if source_style == "bare_step":
+            return f"{name} {node1} {node2} step"
         source_mode = "s" if analysis_type == "transfer_function" else "step"
         return f"{name} {node1} {node2} {source_mode} {value}"
     if ctype in {"R", "C", "L", "G"}:
@@ -323,13 +345,13 @@ def _line_from_component(component: dict[str, Any], analysis_type: str) -> str |
     return f"{name} {node1} {node2} {value}"
 
 
-def _compile_structured(data: dict[str, Any], analysis_type: str) -> str:
+def _compile_structured(data: dict[str, Any], analysis_type: str, source_style: str = "symbolic") -> str:
     lines: list[str] = []
     seen: set[str] = set()
     for comp in data.get("components") or []:
         if not isinstance(comp, dict):
             continue
-        line = _line_from_component(comp, analysis_type)
+        line = _line_from_component(comp, analysis_type, source_style)
         if not line:
             continue
         name = line.split()[0]
@@ -472,7 +494,7 @@ QUESTION:
 Create the structured circuit graph JSON from the image."""
     raw = _invoke_vlm(llm, STRUCTURED_SYSTEM_PROMPT, row["image_path"], text)
     data = _json_from_text(raw)
-    netlist = _compile_structured(data, _analysis_type(row))
+    netlist = _compile_structured(data, _analysis_type(row), _source_style(row))
     return _make_candidate(row, netlist, "structured", raw, {"structured": data})
 
 
@@ -531,7 +553,7 @@ Use the full image plus these tile observations to produce the complete global s
 def tiled_rewrite(llm: Any, row: dict[str, Any], grid: int = 2, overlap: float = 0.18) -> dict[str, Any]:
     merged = _run_tiled_merge(llm, row, grid=grid, overlap=overlap)
     data = merged["structured"]
-    netlist = _compile_structured(data, _analysis_type(row))
+    netlist = _compile_structured(data, _analysis_type(row), _source_style(row))
     return _make_candidate(
         row,
         netlist,
@@ -578,7 +600,7 @@ def tiled_vote_rewrite(
     if not payloads:
         raise ValueError(f"all tiled vote samples failed: {parse_errors}")
 
-    netlist, voted = _vote_structured_payloads(payloads, _analysis_type(row))
+    netlist, voted = _vote_structured_payloads(payloads, _analysis_type(row), _source_style(row))
     return _make_candidate(
         row,
         netlist,
@@ -635,7 +657,7 @@ Return endpoints for these components from the image."""
     data = _json_from_text(raw)
     remove = {str(name) for name in data.get("remove") or []}
     data["components"] = [comp for comp in data.get("components") or [] if str(comp.get("name") or "") not in remove]
-    netlist = _compile_structured(data, _analysis_type(row))
+    netlist = _compile_structured(data, _analysis_type(row), _source_style(row))
     return _make_candidate(row, netlist, "endpoint_audit", raw, {"structured": data})
 
 
@@ -693,7 +715,7 @@ def tile_consensus_rewrite(_llm: Any, row: dict[str, Any]) -> dict[str, Any]:
             component["nodes"] = list(voted_nodes)
             changes.append({"name": name, "from": list(current_nodes), "to": list(voted_nodes), "votes": ranked[0][1]})
 
-    netlist = _compile_structured(structured, _analysis_type(row))
+    netlist = _compile_structured(structured, _analysis_type(row), _source_style(row))
     return _make_candidate(
         row,
         netlist,
@@ -703,7 +725,11 @@ def tile_consensus_rewrite(_llm: Any, row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _vote_structured_payloads(payloads: list[dict[str, Any]], analysis_type: str) -> tuple[str, dict[str, Any]]:
+def _vote_structured_payloads(
+    payloads: list[dict[str, Any]],
+    analysis_type: str,
+    source_style: str = "symbolic",
+) -> tuple[str, dict[str, Any]]:
     comp_votes: dict[str, Counter] = defaultdict(Counter)
     short_votes: Counter = Counter()
     for payload in payloads:
@@ -739,7 +765,7 @@ def _vote_structured_payloads(payloads: list[dict[str, Any]], analysis_type: str
         if count >= threshold
     ]
     voted = {"components": components, "shorts": shorts, "vote_count": len(payloads), "threshold": threshold}
-    return _compile_structured(voted, analysis_type), voted
+    return _compile_structured(voted, analysis_type, source_style), voted
 
 
 def voting_rewrite(llm: Any, row: dict[str, Any], samples: int) -> dict[str, Any]:
@@ -761,7 +787,7 @@ Create the structured circuit graph JSON from the image. Be precise about compon
             parse_errors.append(f"{type(exc).__name__}: {exc}")
     if not payloads:
         raise ValueError(f"all vote samples failed to parse: {parse_errors}")
-    netlist, voted = _vote_structured_payloads(payloads, _analysis_type(row))
+    netlist, voted = _vote_structured_payloads(payloads, _analysis_type(row), _source_style(row))
     return _make_candidate(
         row,
         netlist,

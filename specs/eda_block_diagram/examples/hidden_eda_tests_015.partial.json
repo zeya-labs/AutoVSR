@@ -1,0 +1,325 @@
+{
+  "schema": "eda_block_diagram.v0.1",
+  "source": {
+    "image_path": "eda-problem-6/datasets/Hidden/images/EDA_TESTs_015.jpg",
+    "image_width": 1116,
+    "image_height": 372
+  },
+  "diagram": {
+    "title": null,
+    "domain": ["control_system", "robotics", "quadcopter"],
+    "view_type": "block_diagram"
+  },
+  "nodes": [
+    {
+      "id": "n_zd",
+      "kind": "source_sink",
+      "label": "z_d",
+      "bbox": {"x": 4, "y": 13, "w": 42, "h": 54},
+      "ports": ["p_zd_out"],
+      "confidence": 0.93
+    },
+    {
+      "id": "n_xd",
+      "kind": "source_sink",
+      "label": "x_d",
+      "bbox": {"x": 4, "y": 72, "w": 42, "h": 54},
+      "ports": ["p_xd_out"],
+      "confidence": 0.93
+    },
+    {
+      "id": "n_yd",
+      "kind": "source_sink",
+      "label": "y_d",
+      "bbox": {"x": 4, "y": 132, "w": 42, "h": 54},
+      "ports": ["p_yd_out"],
+      "confidence": 0.93
+    },
+    {
+      "id": "n_psid",
+      "kind": "source_sink",
+      "label": "psi_d",
+      "bbox": {"x": 482, "y": 213, "w": 42, "h": 54},
+      "ports": ["p_psid_out"],
+      "confidence": 0.9
+    },
+    {
+      "id": "n_sum_z",
+      "kind": "operator",
+      "subtype": "math.sum",
+      "label": "+/-",
+      "bbox": {"x": 80, "y": 22, "w": 31, "h": 31},
+      "ports": ["p_sum_z_ref", "p_sum_z_feedback", "p_sum_z_out"],
+      "properties": {
+        "inputs": [
+          {"port": "p_sum_z_ref", "sign": "+"},
+          {"port": "p_sum_z_feedback", "sign": "-"}
+        ]
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "n_sum_x",
+      "kind": "operator",
+      "subtype": "math.sum",
+      "label": "+/-",
+      "bbox": {"x": 80, "y": 82, "w": 31, "h": 31},
+      "ports": ["p_sum_x_ref", "p_sum_x_feedback", "p_sum_x_out"],
+      "properties": {
+        "inputs": [
+          {"port": "p_sum_x_ref", "sign": "+"},
+          {"port": "p_sum_x_feedback", "sign": "-"}
+        ]
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "n_sum_y",
+      "kind": "operator",
+      "subtype": "math.sum",
+      "label": "+/-",
+      "bbox": {"x": 80, "y": 142, "w": 31, "h": 31},
+      "ports": ["p_sum_y_ref", "p_sum_y_feedback", "p_sum_y_out"],
+      "properties": {
+        "inputs": [
+          {"port": "p_sum_y_ref", "sign": "+"},
+          {"port": "p_sum_y_feedback", "sign": "-"}
+        ]
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "n_pid_altitude",
+      "kind": "functional_block",
+      "subtype": "controller.pid",
+      "label": "PID",
+      "text": {"main": "PID", "lines": ["PID", "For altitude"]},
+      "bbox": {"x": 226, "y": 20, "w": 145, "h": 52},
+      "ports": ["p_pid_alt_in", "p_pid_alt_out"],
+      "properties": {"role": "altitude controller"},
+      "confidence": 0.94
+    },
+    {
+      "id": "n_pid_x",
+      "kind": "functional_block",
+      "subtype": "controller.pid",
+      "label": "PID",
+      "text": {"main": "PID", "lines": ["PID", "For x position"]},
+      "bbox": {"x": 226, "y": 79, "w": 145, "h": 52},
+      "ports": ["p_pid_x_in", "p_pid_x_out"],
+      "properties": {"role": "x position controller"},
+      "confidence": 0.94
+    },
+    {
+      "id": "n_pid_y",
+      "kind": "functional_block",
+      "subtype": "controller.pid",
+      "label": "PID",
+      "text": {"main": "PID", "lines": ["PID", "For y position"]},
+      "bbox": {"x": 226, "y": 139, "w": 145, "h": 52},
+      "ports": ["p_pid_y_in", "p_pid_y_out"],
+      "properties": {"role": "y position controller"},
+      "confidence": 0.94
+    },
+    {
+      "id": "n_conversion",
+      "kind": "functional_block",
+      "subtype": "control.conversion",
+      "label": "Conversion",
+      "text": {
+        "main": "Conversion",
+        "lines": ["Conversion", "Convert control", "signals T to", "attitude set-points"]
+      },
+      "bbox": {"x": 401, "y": 98, "w": 160, "h": 92},
+      "ports": ["p_conversion_t_in", "p_conversion_tx_in", "p_conversion_ty_in", "p_conversion_phi_out", "p_conversion_theta_out"],
+      "confidence": 0.92
+    },
+    {
+      "id": "n_sum_phi",
+      "kind": "operator",
+      "subtype": "math.sum",
+      "label": "+/-",
+      "bbox": {"x": 590, "y": 104, "w": 31, "h": 31},
+      "ports": ["p_sum_phi_ref", "p_sum_phi_feedback", "p_sum_phi_out"],
+      "properties": {
+        "inputs": [
+          {"port": "p_sum_phi_ref", "sign": "+"},
+          {"port": "p_sum_phi_feedback", "sign": "-"}
+        ]
+      },
+      "confidence": 0.88
+    },
+    {
+      "id": "n_sum_theta",
+      "kind": "operator",
+      "subtype": "math.sum",
+      "label": "+/-",
+      "bbox": {"x": 626, "y": 155, "w": 31, "h": 31},
+      "ports": ["p_sum_theta_ref", "p_sum_theta_feedback", "p_sum_theta_out"],
+      "properties": {
+        "inputs": [
+          {"port": "p_sum_theta_ref", "sign": "+"},
+          {"port": "p_sum_theta_feedback", "sign": "-"}
+        ]
+      },
+      "confidence": 0.88
+    },
+    {
+      "id": "n_sum_psi",
+      "kind": "operator",
+      "subtype": "math.sum",
+      "label": "+/-",
+      "bbox": {"x": 658, "y": 213, "w": 31, "h": 31},
+      "ports": ["p_sum_psi_ref", "p_sum_psi_feedback", "p_sum_psi_out"],
+      "properties": {
+        "inputs": [
+          {"port": "p_sum_psi_ref", "sign": "+"},
+          {"port": "p_sum_psi_feedback", "sign": "-"}
+        ]
+      },
+      "confidence": 0.88
+    },
+    {
+      "id": "n_pid_mfnn_phi",
+      "kind": "functional_block",
+      "subtype": "controller.pid_mfnn",
+      "label": "PID - MFNN",
+      "text": {"main": "PID - MFNN", "lines": ["PID - MFNN", "For phi"]},
+      "bbox": {"x": 721, "y": 91, "w": 132, "h": 48},
+      "ports": ["p_pid_mfnn_phi_in", "p_pid_mfnn_phi_out"],
+      "confidence": 0.91
+    },
+    {
+      "id": "n_pid_mfnn_theta",
+      "kind": "functional_block",
+      "subtype": "controller.pid_mfnn",
+      "label": "PID - MFNN",
+      "text": {"main": "PID - MFNN", "lines": ["PID - MFNN", "For theta"]},
+      "bbox": {"x": 721, "y": 148, "w": 132, "h": 48},
+      "ports": ["p_pid_mfnn_theta_in", "p_pid_mfnn_theta_out"],
+      "confidence": 0.91
+    },
+    {
+      "id": "n_pid_mfnn_psi",
+      "kind": "functional_block",
+      "subtype": "controller.pid_mfnn",
+      "label": "PID - MFNN",
+      "text": {"main": "PID - MFNN", "lines": ["PID - MFNN", "For psi"]},
+      "bbox": {"x": 721, "y": 207, "w": 132, "h": 48},
+      "ports": ["p_pid_mfnn_psi_in", "p_pid_mfnn_psi_out"],
+      "confidence": 0.91
+    },
+    {
+      "id": "n_quadcopter",
+      "kind": "functional_block",
+      "subtype": "system.dynamics",
+      "label": "Quadcopter Dynamics",
+      "bbox": {"x": 886, "y": 13, "w": 151, "h": 213},
+      "ports": ["p_quadcopter_u1", "p_quadcopter_u2", "p_quadcopter_u3", "p_quadcopter_u4", "p_quadcopter_state_out"],
+      "confidence": 0.95
+    }
+  ],
+  "ports": [
+    {"id": "p_zd_out", "node": "n_zd", "direction": "out", "side": "right", "signal": "z_d"},
+    {"id": "p_xd_out", "node": "n_xd", "direction": "out", "side": "right", "signal": "x_d"},
+    {"id": "p_yd_out", "node": "n_yd", "direction": "out", "side": "right", "signal": "y_d"},
+    {"id": "p_psid_out", "node": "n_psid", "direction": "out", "side": "right", "signal": "psi_d"},
+    {"id": "p_sum_z_ref", "node": "n_sum_z", "direction": "in", "side": "left", "signal": "z_d"},
+    {"id": "p_sum_z_feedback", "node": "n_sum_z", "direction": "in", "side": "bottom", "signal": "z"},
+    {"id": "p_sum_z_out", "node": "n_sum_z", "direction": "out", "side": "right"},
+    {"id": "p_sum_x_ref", "node": "n_sum_x", "direction": "in", "side": "left", "signal": "x_d"},
+    {"id": "p_sum_x_feedback", "node": "n_sum_x", "direction": "in", "side": "bottom", "signal": "x"},
+    {"id": "p_sum_x_out", "node": "n_sum_x", "direction": "out", "side": "right"},
+    {"id": "p_sum_y_ref", "node": "n_sum_y", "direction": "in", "side": "left", "signal": "y_d"},
+    {"id": "p_sum_y_feedback", "node": "n_sum_y", "direction": "in", "side": "bottom", "signal": "y"},
+    {"id": "p_sum_y_out", "node": "n_sum_y", "direction": "out", "side": "right"},
+    {"id": "p_pid_alt_in", "node": "n_pid_altitude", "direction": "in", "side": "left"},
+    {"id": "p_pid_alt_out", "node": "n_pid_altitude", "direction": "out", "side": "right", "signal": "U1"},
+    {"id": "p_pid_x_in", "node": "n_pid_x", "direction": "in", "side": "left"},
+    {"id": "p_pid_x_out", "node": "n_pid_x", "direction": "out", "side": "right", "signal": "T_x"},
+    {"id": "p_pid_y_in", "node": "n_pid_y", "direction": "in", "side": "left"},
+    {"id": "p_pid_y_out", "node": "n_pid_y", "direction": "out", "side": "right", "signal": "T_y"},
+    {"id": "p_conversion_t_in", "node": "n_conversion", "direction": "in", "side": "left", "signal": "T"},
+    {"id": "p_conversion_tx_in", "node": "n_conversion", "direction": "in", "side": "left", "signal": "T_x"},
+    {"id": "p_conversion_ty_in", "node": "n_conversion", "direction": "in", "side": "left", "signal": "T_y"},
+    {"id": "p_conversion_phi_out", "node": "n_conversion", "direction": "out", "side": "right", "signal": "phi_d"},
+    {"id": "p_conversion_theta_out", "node": "n_conversion", "direction": "out", "side": "right", "signal": "theta_d"},
+    {"id": "p_sum_phi_ref", "node": "n_sum_phi", "direction": "in", "side": "left", "signal": "phi_d"},
+    {"id": "p_sum_phi_feedback", "node": "n_sum_phi", "direction": "in", "side": "bottom", "signal": "phi"},
+    {"id": "p_sum_phi_out", "node": "n_sum_phi", "direction": "out", "side": "right", "signal": "U2"},
+    {"id": "p_sum_theta_ref", "node": "n_sum_theta", "direction": "in", "side": "left", "signal": "theta_d"},
+    {"id": "p_sum_theta_feedback", "node": "n_sum_theta", "direction": "in", "side": "bottom", "signal": "theta"},
+    {"id": "p_sum_theta_out", "node": "n_sum_theta", "direction": "out", "side": "right", "signal": "U3"},
+    {"id": "p_sum_psi_ref", "node": "n_sum_psi", "direction": "in", "side": "left", "signal": "psi_d"},
+    {"id": "p_sum_psi_feedback", "node": "n_sum_psi", "direction": "in", "side": "bottom", "signal": "psi"},
+    {"id": "p_sum_psi_out", "node": "n_sum_psi", "direction": "out", "side": "right", "signal": "U4"},
+    {"id": "p_pid_mfnn_phi_in", "node": "n_pid_mfnn_phi", "direction": "in", "side": "left", "signal": "U2"},
+    {"id": "p_pid_mfnn_phi_out", "node": "n_pid_mfnn_phi", "direction": "out", "side": "right"},
+    {"id": "p_pid_mfnn_theta_in", "node": "n_pid_mfnn_theta", "direction": "in", "side": "left", "signal": "U3"},
+    {"id": "p_pid_mfnn_theta_out", "node": "n_pid_mfnn_theta", "direction": "out", "side": "right"},
+    {"id": "p_pid_mfnn_psi_in", "node": "n_pid_mfnn_psi", "direction": "in", "side": "left", "signal": "U4"},
+    {"id": "p_pid_mfnn_psi_out", "node": "n_pid_mfnn_psi", "direction": "out", "side": "right"},
+    {"id": "p_quadcopter_u1", "node": "n_quadcopter", "direction": "in", "side": "left", "signal": "U1"},
+    {"id": "p_quadcopter_u2", "node": "n_quadcopter", "direction": "in", "side": "left", "signal": "U2"},
+    {"id": "p_quadcopter_u3", "node": "n_quadcopter", "direction": "in", "side": "left", "signal": "U3"},
+    {"id": "p_quadcopter_u4", "node": "n_quadcopter", "direction": "in", "side": "left", "signal": "U4"},
+    {"id": "p_quadcopter_state_out", "node": "n_quadcopter", "direction": "out", "side": "right", "signal": "z,x,y,phi,theta,psi"}
+  ],
+  "edges": [
+    {"id": "e_zd_to_sum_z", "kind": "signal", "source": "p_zd_out", "target": "p_sum_z_ref", "direction": "directed", "label": "z_d"},
+    {"id": "e_xd_to_sum_x", "kind": "signal", "source": "p_xd_out", "target": "p_sum_x_ref", "direction": "directed", "label": "x_d"},
+    {"id": "e_yd_to_sum_y", "kind": "signal", "source": "p_yd_out", "target": "p_sum_y_ref", "direction": "directed", "label": "y_d"},
+    {"id": "e_sum_z_to_pid_alt", "kind": "signal", "source": "p_sum_z_out", "target": "p_pid_alt_in", "direction": "directed"},
+    {"id": "e_sum_x_to_pid_x", "kind": "signal", "source": "p_sum_x_out", "target": "p_pid_x_in", "direction": "directed"},
+    {"id": "e_sum_y_to_pid_y", "kind": "signal", "source": "p_sum_y_out", "target": "p_pid_y_in", "direction": "directed"},
+    {"id": "e_pid_alt_to_quadcopter", "kind": "signal", "source": "p_pid_alt_out", "target": "p_quadcopter_u1", "direction": "directed", "label": "U1"},
+    {"id": "e_pid_x_to_conversion", "kind": "signal", "source": "p_pid_x_out", "target": "p_conversion_tx_in", "direction": "directed", "label": "T_x"},
+    {"id": "e_pid_y_to_conversion", "kind": "signal", "source": "p_pid_y_out", "target": "p_conversion_ty_in", "direction": "directed", "label": "T_y"},
+    {"id": "e_conversion_phi_to_sum", "kind": "signal", "source": "p_conversion_phi_out", "target": "p_sum_phi_ref", "direction": "directed", "label": "phi_d"},
+    {"id": "e_conversion_theta_to_sum", "kind": "signal", "source": "p_conversion_theta_out", "target": "p_sum_theta_ref", "direction": "directed", "label": "theta_d"},
+    {"id": "e_psid_to_sum_psi", "kind": "signal", "source": "p_psid_out", "target": "p_sum_psi_ref", "direction": "directed", "label": "psi_d"},
+    {"id": "e_sum_phi_to_mfnn", "kind": "signal", "source": "p_sum_phi_out", "target": "p_pid_mfnn_phi_in", "direction": "directed", "label": "U2"},
+    {"id": "e_sum_theta_to_mfnn", "kind": "signal", "source": "p_sum_theta_out", "target": "p_pid_mfnn_theta_in", "direction": "directed", "label": "U3"},
+    {"id": "e_sum_psi_to_mfnn", "kind": "signal", "source": "p_sum_psi_out", "target": "p_pid_mfnn_psi_in", "direction": "directed", "label": "U4"},
+    {"id": "e_mfnn_phi_to_quadcopter", "kind": "signal", "source": "p_pid_mfnn_phi_out", "target": "p_quadcopter_u2", "direction": "directed"},
+    {"id": "e_mfnn_theta_to_quadcopter", "kind": "signal", "source": "p_pid_mfnn_theta_out", "target": "p_quadcopter_u3", "direction": "directed"},
+    {"id": "e_mfnn_psi_to_quadcopter", "kind": "signal", "source": "p_pid_mfnn_psi_out", "target": "p_quadcopter_u4", "direction": "directed"},
+    {"id": "e_quadcopter_state_feedback", "kind": "feedback", "source": "p_quadcopter_state_out", "target": "p_sum_z_feedback", "direction": "directed", "label": "z,x,y,phi,theta,psi"}
+  ],
+  "groups": [
+    {
+      "id": "g_position_control",
+      "kind": "region",
+      "label": "Position Control",
+      "style": {"boundary": "dashed", "color": "black"},
+      "bbox": {"x": 214, "y": 4, "w": 164, "h": 199},
+      "contains": {
+        "nodes": ["n_pid_altitude", "n_pid_x", "n_pid_y"],
+        "edges": []
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "g_attitude_control",
+      "kind": "region",
+      "label": "Proposed Attitude Control",
+      "style": {"boundary": "dashed", "color": "blue"},
+      "bbox": {"x": 711, "y": 82, "w": 154, "h": 200},
+      "contains": {
+        "nodes": ["n_pid_mfnn_phi", "n_pid_mfnn_theta", "n_pid_mfnn_psi"],
+        "edges": []
+      },
+      "confidence": 0.9
+    }
+  ],
+  "texts": [
+    {"id": "t_position_control", "text": "Position Control", "role": "group_label", "attached_to": "g_position_control", "confidence": 0.95},
+    {"id": "t_attitude_control", "text": "Proposed Attitude Control", "role": "group_label", "attached_to": "g_attitude_control", "confidence": 0.95}
+  ],
+  "annotations": [],
+  "legend": [],
+  "warnings": [
+    "Partial example: feedback trunk is represented as one aggregate state edge rather than separate z/x/y/phi/theta/psi branch edges.",
+    "Some bounding boxes are approximate."
+  ]
+}

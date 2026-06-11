@@ -174,6 +174,13 @@ NETLIST_BUILD_SYSTEM_PROMPT = """You are an expert in electronic circuit analysi
 
 {rules}
 
+Before finalizing the netlist, do a visual inventory pass:
+- Include every visible labeled R/C/L/V/I component exactly once, including edge components, bottom/top branches, and parallel branches.
+- Do not include ordinary wire segments as components. Use W only for an explicitly labeled or visually explicit short between two different node labels.
+- Never output self-loop wires such as `W1 3 3`; they are not circuit components.
+- A component endpoint is the nearest blue node label on the same uninterrupted conductor at that terminal.
+- Components block connectivity. Do not propagate a node label through a resistor, capacitor, inductor, or source to a farther label.
+
 Polarity is part of the answer. Preserve the schematic direction exactly:
 - For independent voltage sources, the first node in `Vname Np Nm ...` must be the drawn `+` terminal and the second node must be the drawn `-` terminal.
 - For a passive element used as the requested output, list its first node at the drawn `+`/reference side if the diagram marks one. Do not swap two-terminal element nodes casually; reversing them changes the sign of transfer functions and node responses.
@@ -236,6 +243,7 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
 
     # Analysis information from classify stage
     analysis_type = state.get("analysis_type", "transfer_function")
+    source_style = "bare_step" if "level1" in str(image_path) else str(state.get("source_style") or "symbolic")
     input_source = state.get("input_source")
     output_node = state.get("output_node")
     constraints = state.get("constraints")  # Constraints extracted from diagram/question
@@ -297,7 +305,9 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
             if analysis_type:
                 context_parts.append(f"Analysis: {analysis_type}")
                 # Distinguish between transfer function and AC steady-state analysis
-                if analysis_type in ["transfer_function", "s-domain", "impedance", "frequency"]:
+                if source_style == "bare_step":
+                    context_parts.append("⚠️ For this CircuitSense level, independent sources MUST use bare step form: `Vname Np Nm step` (NOT `s Vname` and NOT `step Vname`).")
+                elif analysis_type in ["transfer_function", "s-domain", "impedance", "frequency"]:
                     context_parts.append("⚠️ For transfer function H(s), input sources MUST use s-domain: `Vname Np Nm s Symbol` (NOT step/dc)")
                 elif analysis_type == "ac":
                     context_parts.append("⚠️ For AC steady-state analysis with sin(omega*t) sources, use TIME-DOMAIN expressions: `Vname Np Nm {A*sin(omega*t)}` or `Vname Np Nm {A*cos(omega*t)}`")
@@ -383,13 +393,12 @@ def build_netlist_node(state: Dict[str, Any], llm) -> Dict[str, Any]:
     # Transient-response labels in CircuitSense are s-domain step responses:
     # a source labeled V1 should enter Lcapy as a step source so the result
     # includes the expected 1/s factor.
-    if analysis_type == "transient_response":
+    if analysis_type == "transient_response" or source_style == "bare_step":
         netlist = _fix_transient_source_domains(netlist)
     else:
         netlist = _fix_netlist_sources(netlist)
 
-    # # Auto-fix wire components (W has no value)
-    # netlist = _fix_wire_components(netlist)
+    netlist = _fix_wire_components(netlist)
     
     # # Auto-fix engineering notation (1m → 0.001, 1k → 1000)
     # netlist = _fix_engineering_notation(netlist)
@@ -1228,18 +1237,11 @@ def _fix_netlist_sources(netlist: str) -> str:
 def _fix_transient_source_domains(netlist: str) -> str:
     """Normalize independent sources for CircuitSense s-domain transient responses.
 
-    CircuitSense transient targets model labeled independent sources as step
-    inputs, so V1/I1 should be represented by V1/s or I1/s in the s-domain.
-    Lcapy accepts this as `step value`.
+    CircuitSense transient targets model labeled independent sources as bare
+    step inputs in reference netlists, e.g. `V1 1 0 step`.
     """
     fixed_lines = []
     domain_tokens = {"dc", "ac", "s", "step"}
-
-    def _source_symbol(comp_id: str, value: str) -> str:
-        value = str(value).strip()
-        if re.fullmatch(r'[A-Za-z]\w*', value) and comp_id.upper().startswith(("V", "I")):
-            return comp_id
-        return value
 
     for original_line in netlist.strip().split("\n"):
         line = original_line.strip()
@@ -1259,31 +1261,30 @@ def _fix_transient_source_domains(netlist: str) -> str:
             continue
 
         if not rest:
-            fixed_lines.append(f"{comp_id} {node1} {node2} step {comp_id}")
+            fixed_lines.append(f"{comp_id} {node1} {node2} step")
             continue
 
         first = rest[0]
         first_lower = first.lower()
         if first_lower == "step":
-            fixed_lines.append(original_line)
+            fixed_lines.append(f"{comp_id} {node1} {node2} step")
             continue
 
         if first_lower in {"s", "ac", "dc"}:
-            value = _source_symbol(comp_id, rest[1] if len(rest) > 1 else comp_id)
-            fixed_lines.append(f"{comp_id} {node1} {node2} step {value}")
+            fixed_lines.append(f"{comp_id} {node1} {node2} step")
             continue
 
         if first.startswith("{") or first_lower in domain_tokens:
             fixed_lines.append(original_line)
             continue
 
-        fixed_lines.append(f"{comp_id} {node1} {node2} step {_source_symbol(comp_id, first)}")
+        fixed_lines.append(f"{comp_id} {node1} {node2} step")
 
     return "\n".join(fixed_lines)
 
 
 def _fix_wire_components(netlist: str) -> str:
-    """Remove values from wire components (W has no value)"""
+    """Normalize explicit short wires and drop impossible self-loop wires."""
     lines = netlist.split('\n')
     fixed_lines = []
     
@@ -1293,10 +1294,11 @@ def _fix_wire_components(netlist: str) -> str:
             fixed_lines.append(line)
             continue
         
-        # Pattern: W1 1 2 value → W1 1 2 (remove extra values)
-        match = re.match(r'^(W\w*)\s+(\w+)\s+(\w+)\s+.+$', line, re.IGNORECASE)
-        if match:
-            comp_id, node1, node2 = match.groups()
+        parts = line.split()
+        if parts and parts[0].upper().startswith("W") and len(parts) >= 3:
+            comp_id, node1, node2 = parts[:3]
+            if node1 == node2:
+                continue
             fixed_lines.append(f"{comp_id} {node1} {node2}")
             continue
         
